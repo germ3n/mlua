@@ -98,6 +98,21 @@ pub mod prelude;
 pub use bstr::BString;
 pub use ffi::{self, lua_CFunction, lua_State};
 
+pub enum CallArgsType {
+    U8(u8),
+    I8(i8),
+    U16(u16),
+    I16(i16),
+    U32(u32),
+    I32(i32),
+    U64(u64),
+    I64(i64),
+    U128(u128),
+    I128(i128),
+    Bytes(Vec<u8>),
+    String(String),
+}
+
 pub use crate::chunk::{AsChunk, Chunk, ChunkMode};
 pub use crate::error::{Error, ErrorContext, ExternalError, ExternalResult, Result};
 pub use crate::function::{Function, FunctionInfo};
