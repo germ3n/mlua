@@ -1453,7 +1453,7 @@ impl Lua {
         }
     }
 
-    pub fn get_fuel(&self) -> Result<usize> {
+    pub fn get_fuel(&self) -> Result<u64> {
         let lua = self.lock();
         unsafe {
             Ok(ffi::lua_getfuel(lua.state()))
