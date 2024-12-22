@@ -232,6 +232,9 @@ extern "C-unwind" {
     pub fn lua_call(L: *mut lua_State, nargs: c_int, nresults: c_int);
     pub fn lua_pcall(L: *mut lua_State, nargs: c_int, nresults: c_int, errfunc: c_int) -> c_int;
 
+    pub fn luau_setfuel(L: *mut lua_State, fuel: u64);
+    pub fn luau_getfuel(L: *mut lua_State) -> u64;
+
     //
     // Coroutine functions
     //

@@ -1456,14 +1456,22 @@ impl Lua {
     pub fn get_fuel(&self) -> Result<u64> {
         let lua = self.lock();
         unsafe {
-            Ok(ffi::lua_getfuel(lua.state()))
+            #[cfg(feature = "luau")]
+            return Ok(ffi::luau_getfuel(lua.state()));
+            #[cfg(feature = "lua54")]
+            return Ok(ffi::lua_getfuel(lua.state()));
         }
     }
 
     pub fn set_fuel(&self, fuel: u64) -> Result<()> {
         let lua = self.lock();
         unsafe {
-            Ok(ffi::lua_setfuel(lua.state(), fuel))
+            #[cfg(feature = "luau")]
+            ffi::luau_setfuel(lua.state(), fuel);
+            #[cfg(feature = "lua54")]
+            ffi::lua_setfuel(lua.state(), fuel);
+
+            Ok(())
         }
     }
 

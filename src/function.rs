@@ -125,6 +125,75 @@ impl Function {
         }
     }
 
+    pub enum ArgsType {
+        U8(u8),
+        I8(i8),
+        U16(u16),
+        I16(i16),
+        U32(u32),
+        I32(i32),
+        U64(u64),
+        I64(i64),
+        U128(u128),
+        I128(i128),
+        Bytes(Vec<u8>),
+        String(String),
+    }
+
+    unsafe fn push_into_stack_dynargs(
+        self,
+        lua:    &RawLua,
+        args:   Vec<ArgsType>,
+    ) -> Result<c_int> {
+        let len: c_int = args.len().try_into().unwrap();
+        unsafe {
+            check_stack(lua.state(), len + 1)?;
+            for arg in args {
+                match arg {
+                    ArgsType::U8(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
+                    ArgsType::I8(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
+                    ArgsType::U16(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
+                    ArgsType::I16(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
+                    ArgsType::U32(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
+                    ArgsType::I32(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
+                    ArgsType::U64(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
+                    ArgsType::I64(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
+                    ArgsType::U128(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
+                    ArgsType::I128(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
+                    ArgsType::Bytes(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
+                    ArgsType::String(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
+                }
+            }
+        }
+        Ok(len)
+    }
+
+    pub fn call_dynargs<R: FromLuaMulti>(
+        &self,
+        args: Vec<ArgsType>,
+    ) -> Result<R> {
+        let lua = self.0.lua.lock();
+        let state = lua.state();
+        unsafe {
+            let _sg = StackGuard::new(state);
+            check_stack(state, 2)?;
+
+            lua.push_error_traceback();
+            let stack_start = ffi::lua_gettop(state);
+
+            lua.push_ref(&self.0);
+            let nargs = self.push_into_stack_dynargs(&lua, args)?;
+
+            let ret = ffi::lua_pcall(state, nargs, ffi::LUA_MULTRET, stack_start);
+            if ret != ffi::LUA_OK {
+                return Err(pop_error(state, ret));
+            }
+
+            let nresults = ffi::lua_gettop(state) - stack_start;
+            R::from_stack_multi(nresults, &lua)
+        }
+    }
+
     /// Returns a future that, when polled, calls `self`, passing `args` as function arguments,
     /// and drives the execution.
     ///
