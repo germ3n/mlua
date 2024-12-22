@@ -140,34 +140,6 @@ impl Function {
         }
     }
 
-    unsafe fn push_into_stack_dynargs(
-        self,
-        lua:    &crate::state::RawLua,
-        args:   &Vec<CallArgsType>,
-    ) -> Result<c_int> {
-        let len: c_int = args.len().try_into().unwrap();
-        unsafe {
-            check_stack(lua.state(), len + 1)?;
-            for arg in args {
-                match arg {
-                    CallArgsType::U8(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
-                    CallArgsType::I8(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
-                    CallArgsType::U16(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
-                    CallArgsType::I16(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
-                    CallArgsType::U32(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
-                    CallArgsType::I32(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
-                    CallArgsType::U64(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
-                    CallArgsType::I64(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
-                    CallArgsType::U128(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
-                    CallArgsType::I128(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
-                    CallArgsType::Bytes(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
-                    CallArgsType::String(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
-                }
-            }
-        }
-        Ok(len)
-    }
-
     pub fn call_dynargs<R: FromLuaMulti>(
         &self,
         args: &Vec<CallArgsType>,
@@ -182,8 +154,29 @@ impl Function {
             let stack_start = ffi::lua_gettop(state);
 
             lua.push_ref(&self.0);
-            let nargs = self.push_into_stack_dynargs(&lua, args)?;
+            let nargs = {
+                let len: c_int = args.len().try_into().unwrap();
+                check_stack(lua.state(), len + 1)?;
+                for arg in args {
+                    match arg {
+                        CallArgsType::U8(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
+                        CallArgsType::I8(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
+                        CallArgsType::U16(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
+                        CallArgsType::I16(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
+                        CallArgsType::U32(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
+                        CallArgsType::I32(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
+                        CallArgsType::U64(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
+                        CallArgsType::I64(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
+                        CallArgsType::U128(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
+                        CallArgsType::I128(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
+                        CallArgsType::Bytes(v) => lua.push_value(&v.clone().into_lua(lua.lua())?)?,
+                        CallArgsType::String(v) => lua.push_value(&v.clone().into_lua(lua.lua())?)?,
+                    }
+                }
 
+                len
+            };
+            
             let ret = ffi::lua_pcall(state, nargs, ffi::LUA_MULTRET, stack_start);
             if ret != ffi::LUA_OK {
                 return Err(pop_error(state, ret));
