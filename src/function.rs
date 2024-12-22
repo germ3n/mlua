@@ -23,6 +23,21 @@ use {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Function(pub(crate) ValueRef);
 
+pub enum CallArgsType {
+    U8(u8),
+    I8(i8),
+    U16(u16),
+    I16(i16),
+    U32(u32),
+    I32(i32),
+    U64(u64),
+    I64(i64),
+    U128(u128),
+    I128(i128),
+    Bytes(Vec<u8>),
+    String(String),
+}
+
 /// Contains information about a function.
 ///
 /// Please refer to the [`Lua Debug Interface`] for more information.
@@ -125,43 +140,28 @@ impl Function {
         }
     }
 
-    pub enum ArgsType {
-        U8(u8),
-        I8(i8),
-        U16(u16),
-        I16(i16),
-        U32(u32),
-        I32(i32),
-        U64(u64),
-        I64(i64),
-        U128(u128),
-        I128(i128),
-        Bytes(Vec<u8>),
-        String(String),
-    }
-
     unsafe fn push_into_stack_dynargs(
         self,
         lua:    &RawLua,
-        args:   Vec<ArgsType>,
+        args:   &Vec<CallArgsType>,
     ) -> Result<c_int> {
         let len: c_int = args.len().try_into().unwrap();
         unsafe {
             check_stack(lua.state(), len + 1)?;
             for arg in args {
                 match arg {
-                    ArgsType::U8(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
-                    ArgsType::I8(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
-                    ArgsType::U16(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
-                    ArgsType::I16(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
-                    ArgsType::U32(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
-                    ArgsType::I32(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
-                    ArgsType::U64(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
-                    ArgsType::I64(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
-                    ArgsType::U128(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
-                    ArgsType::I128(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
-                    ArgsType::Bytes(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
-                    ArgsType::String(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
+                    CallArgsType::U8(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
+                    CallArgsType::I8(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
+                    CallArgsType::U16(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
+                    CallArgsType::I16(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
+                    CallArgsType::U32(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
+                    CallArgsType::I32(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
+                    CallArgsType::U64(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
+                    CallArgsType::I64(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
+                    CallArgsType::U128(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
+                    CallArgsType::I128(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
+                    CallArgsType::Bytes(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
+                    CallArgsType::String(v) => lua.push_value(&v.into_lua(lua.lua())?)?,
                 }
             }
         }
@@ -170,7 +170,7 @@ impl Function {
 
     pub fn call_dynargs<R: FromLuaMulti>(
         &self,
-        args: Vec<ArgsType>,
+        args: &Vec<CallArgsType>,
     ) -> Result<R> {
         let lua = self.0.lua.lock();
         let state = lua.state();
