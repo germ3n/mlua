@@ -142,7 +142,7 @@ impl Function {
 
     unsafe fn push_into_stack_dynargs(
         self,
-        lua:    &RawLua,
+        lua:    &crate::state::RawLua,
         args:   &Vec<CallArgsType>,
     ) -> Result<c_int> {
         let len: c_int = args.len().try_into().unwrap();
