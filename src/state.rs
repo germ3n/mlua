@@ -1453,6 +1453,20 @@ impl Lua {
         }
     }
 
+    pub fn get_fuel(&self) -> Result<usize> {
+        let lua = self.lock();
+        unsafe {
+            Ok(ffi::lua_getfuel(lua.state()))
+        }
+    }
+
+    pub fn set_fuel(&self, fuel: u64) -> Result<()> {
+        let lua = self.lock();
+        unsafe {
+            Ok(ffi::lua_setfuel(lua.state(), fuel))
+        }
+    }
+
     /// Returns a handle to the active `Thread`.
     ///
     /// For calls to `Lua` this will be the main Lua thread, for parameters given to a callback,

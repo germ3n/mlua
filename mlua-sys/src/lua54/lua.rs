@@ -153,6 +153,9 @@ extern "C-unwind" {
     pub fn lua_touserdata(L: *mut lua_State, idx: c_int) -> *mut c_void;
     pub fn lua_tothread(L: *mut lua_State, idx: c_int) -> *mut lua_State;
     pub fn lua_topointer(L: *mut lua_State, idx: c_int) -> *const c_void;
+
+    pub fn lua_getfuel(L: *mut lua_State) -> u64;
+    pub fn lua_setfuel(L: *mut lua_State, fuel: u64);
 }
 
 // lua_rawlen's return type changed from size_t to lua_Unsigned int in Lua 5.4.
