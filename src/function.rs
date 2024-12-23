@@ -164,11 +164,11 @@ impl Function {
         Ok(stack_start)
     }
 
-    pub fn push_arg<A: IntoLua + Clone>(&self, 
+    pub fn push_arg<A: IntoLua>(&self, 
         lua: &LuaGuard,
-        arg: &A
+        arg: A
     ) -> Result<()> {
-        unsafe { lua.push_value(&arg.clone().into_lua(lua.lua()).unwrap()) }
+        unsafe { lua.push_value(&arg.into_lua(lua.lua())?) }
     }
 
     pub fn complete_func_call<R: FromLuaMulti>(
