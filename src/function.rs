@@ -3,7 +3,7 @@ use std::os::raw::{c_int, c_void};
 use std::{mem, ptr, slice};
 
 use crate::error::{Error, Result};
-use crate::state::Lua;
+use crate::state::{Lua, LuaGuard};
 use crate::table::Table;
 use crate::traits::{FromLuaMulti, IntoLua, IntoLuaMulti, LuaNativeFn, LuaNativeFnMut};
 use crate::types::{Callback, LuaType, MaybeSend, ValueRef};
@@ -125,6 +125,64 @@ impl Function {
             let nresults = ffi::lua_gettop(state) - stack_start;
             R::from_stack_multi(nresults, &lua)
         }
+    }
+
+    pub fn lock_lua(&self) -> LuaGuard 
+    {
+        self.0.lua.lock()
+    }
+
+    pub fn get_stack_guard(&self, 
+        lua: &LuaGuard,
+        amt: c_int
+    ) -> StackGuard {
+        unsafe { StackGuard::new(lua.state()) }
+    }
+
+    pub fn check_stack(
+        &self, 
+        n: c_int
+    )
+    {
+        unsafe { check_stack(self.lock_lua().state(), n)? }
+    }
+
+    pub fn setup_func_call(&self, 
+        lua: &LuaGuard,
+        amt: c_int
+    ) -> Result<c_int> {
+        self.check_stack(amt)?;
+
+        unsafe { lua.push_error_traceback(); }
+        unsafe { lua.push_ref(&self.0); }
+
+        let stack_start = ffi::lua_gettop(lua.state());
+
+        lua.push_ref(&self.0);
+
+        Ok(stack_start)
+    }
+
+    pub fn push_arg<A: IntoLua>(&self, 
+        lua: &LuaGuard,
+        arg: &A
+    ) -> Result<()> {
+        unsafe { lua.push_value(&arg.into_lua(lua.lua())?) }
+    }
+
+    pub fn complete_func_call<R: FromLuaMulti>(
+        &self, 
+        lua: &LuaGuard,
+        stack_start: c_int,
+        nargs: c_int
+    ) -> Result<R> {
+        let ret = ffi::lua_pcall(state, nargs, ffi::LUA_MULTRET, stack_start);
+        if ret != ffi::LUA_OK {
+            return Err(unsafe { pop_error(state, ret) });
+        }
+
+        let nresults = ffi::lua_gettop(state) - stack_start;
+        unsafe { R::from_stack_multi(nresults, &lua) }
     }
 
     pub fn call_dynargs<R: FromLuaMulti>(
