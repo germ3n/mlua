@@ -59,7 +59,7 @@ pub struct Lua {
 #[derive(Clone)]
 pub(crate) struct WeakLua(XWeak<ReentrantMutex<RawLua>>);
 
-pub(crate) struct LuaGuard(ArcReentrantMutexGuard<RawLua>);
+pub struct LuaGuard(ArcReentrantMutexGuard<RawLua>);
 
 /// Mode of the Lua garbage collector (GC).
 ///
