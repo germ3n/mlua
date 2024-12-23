@@ -144,30 +144,33 @@ impl Function {
         n: c_int
     )
     {
-        unsafe { check_stack(self.lock_lua().state(), n)? }
+        unsafe { check_stack(self.lock_lua().state(), n).unwrap() }
     }
 
     pub fn setup_func_call(&self, 
         lua: &LuaGuard,
         amt: c_int
     ) -> Result<c_int> {
-        self.check_stack(amt)?;
+        self.check_stack(amt);
 
-        unsafe { lua.push_error_traceback(); }
-        unsafe { lua.push_ref(&self.0); }
+        let stack_start;
+        unsafe { 
+            lua.push_error_traceback(); 
+            lua.push_ref(&self.0); 
+    
+            stack_start = ffi::lua_gettop(lua.state());
 
-        let stack_start = ffi::lua_gettop(lua.state());
-
-        lua.push_ref(&self.0);
+            lua.push_ref(&self.0);
+        }
 
         Ok(stack_start)
     }
 
-    pub fn push_arg<A: IntoLua>(&self, 
+    pub fn push_arg<A: IntoLua + Clone>(&self, 
         lua: &LuaGuard,
         arg: &A
     ) -> Result<()> {
-        unsafe { lua.push_value(&arg.into_lua(lua.lua())?) }
+        unsafe { lua.push_value(&arg.clone().into_lua(lua.lua()).unwrap()) }
     }
 
     pub fn complete_func_call<R: FromLuaMulti>(
@@ -176,13 +179,17 @@ impl Function {
         stack_start: c_int,
         nargs: c_int
     ) -> Result<R> {
-        let ret = ffi::lua_pcall(state, nargs, ffi::LUA_MULTRET, stack_start);
-        if ret != ffi::LUA_OK {
-            return Err(unsafe { pop_error(state, ret) });
-        }
+        let state = lua.state();
+        unsafe {
+            let ret = ffi::lua_pcall(state, nargs, ffi::LUA_MULTRET, stack_start);
+            if ret != ffi::LUA_OK 
+            {
+                return Err(pop_error(state, ret));
+            }
 
-        let nresults = ffi::lua_gettop(state) - stack_start;
-        unsafe { R::from_stack_multi(nresults, &lua) }
+            let nresults = ffi::lua_gettop(state) - stack_start;
+            R::from_stack_multi(nresults, &lua)
+        }
     }
 
     pub fn call_dynargs<R: FromLuaMulti>(
