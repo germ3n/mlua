@@ -133,8 +133,7 @@ impl Function {
     }
 
     pub fn get_stack_guard(&self, 
-        lua: &LuaGuard,
-        amt: c_int
+        lua: &LuaGuard
     ) -> StackGuard {
         unsafe { StackGuard::new(lua.state()) }
     }
