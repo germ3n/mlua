@@ -150,13 +150,12 @@ impl Function {
         lua: &LuaGuard,
         amt: c_int
     ) -> Result<c_int> {
-        self.check_stack(amt);
+        self.check_stack(2);
 
         let stack_start;
         unsafe { 
             lua.push_error_traceback(); 
-            lua.push_ref(&self.0); 
-    
+
             stack_start = ffi::lua_gettop(lua.state());
 
             lua.push_ref(&self.0);
