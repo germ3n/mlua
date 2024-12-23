@@ -41,7 +41,7 @@ pub(crate) unsafe fn check_stack(state: *mut ffi::lua_State, amount: c_int) -> R
     }
 }
 
-pub(crate) struct StackGuard {
+pub struct StackGuard {
     state: *mut ffi::lua_State,
     top: c_int,
 }
