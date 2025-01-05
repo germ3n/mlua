@@ -1302,20 +1302,20 @@ unsafe fn load_std_libs(state: *mut ffi::lua_State, libs: StdLib) -> Result<()> 
     #[cfg(feature = "luajit")]
     let _gc_guard = GcGuard::new(state);
 
-    #[cfg(any(feature = "lua54", feature = "lua53", feature = "lua52", feature = "luau"))]
+    /*#[cfg(any(feature = "lua54", feature = "lua53", feature = "lua52", feature = "luau"))]
     {
         if libs.contains(StdLib::COROUTINE) {
             requiref(state, ffi::LUA_COLIBNAME, ffi::luaopen_coroutine, 1)?;
             ffi::lua_pop(state, 1);
         }
-    }
+    }*/
 
     if libs.contains(StdLib::TABLE) {
         requiref(state, ffi::LUA_TABLIBNAME, ffi::luaopen_table, 1)?;
         ffi::lua_pop(state, 1);
     }
 
-    #[cfg(not(feature = "luau"))]
+    /*#[cfg(not(feature = "luau"))]
     if libs.contains(StdLib::IO) {
         requiref(state, ffi::LUA_IOLIBNAME, ffi::luaopen_io, 1)?;
         ffi::lua_pop(state, 1);
@@ -1324,7 +1324,7 @@ unsafe fn load_std_libs(state: *mut ffi::lua_State, libs: StdLib) -> Result<()> 
     if libs.contains(StdLib::OS) {
         requiref(state, ffi::LUA_OSLIBNAME, ffi::luaopen_os, 1)?;
         ffi::lua_pop(state, 1);
-    }
+    }*/
 
     if libs.contains(StdLib::STRING) {
         requiref(state, ffi::LUA_STRLIBNAME, ffi::luaopen_string, 1)?;
@@ -1355,7 +1355,7 @@ unsafe fn load_std_libs(state: *mut ffi::lua_State, libs: StdLib) -> Result<()> 
         }
     }
 
-    #[cfg(feature = "luau")]
+    /*#[cfg(feature = "luau")]
     if libs.contains(StdLib::BUFFER) {
         requiref(state, ffi::LUA_BUFFERLIBNAME, ffi::luaopen_buffer, 1)?;
         ffi::lua_pop(state, 1);
@@ -1365,28 +1365,28 @@ unsafe fn load_std_libs(state: *mut ffi::lua_State, libs: StdLib) -> Result<()> 
     if libs.contains(StdLib::VECTOR) {
         requiref(state, ffi::LUA_VECLIBNAME, ffi::luaopen_vector, 1)?;
         ffi::lua_pop(state, 1);
-    }
+    }*/
 
     if libs.contains(StdLib::MATH) {
         requiref(state, ffi::LUA_MATHLIBNAME, ffi::luaopen_math, 1)?;
         ffi::lua_pop(state, 1);
     }
 
-    if libs.contains(StdLib::DEBUG) {
+    /*if libs.contains(StdLib::DEBUG) {
         requiref(state, ffi::LUA_DBLIBNAME, ffi::luaopen_debug, 1)?;
         ffi::lua_pop(state, 1);
-    }
+    }*/
 
-    #[cfg(not(feature = "luau"))]
+    /*#[cfg(not(feature = "luau"))]
     if libs.contains(StdLib::PACKAGE) {
         requiref(state, ffi::LUA_LOADLIBNAME, ffi::luaopen_package, 1)?;
         ffi::lua_pop(state, 1);
-    }
-    #[cfg(feature = "luau")]
+    }*/
+    /*#[cfg(feature = "luau")]
     if libs.contains(StdLib::PACKAGE) {
         let lua = (*ExtraData::get(state)).lua();
         crate::luau::register_package_module(lua)?;
-    }
+    }*/
 
     #[cfg(feature = "luajit")]
     if libs.contains(StdLib::JIT) {
