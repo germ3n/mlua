@@ -1,12 +1,11 @@
 #![cfg(feature = "luau")]
 
 use std::fmt::Debug;
-use std::fs;
-use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use mlua::{Compiler, Error, Lua, LuaOptions, Result, StdLib, Table, ThreadStatus, Value, Vector, VmState};
+use mlua::chunk::Compiler;
+use mlua::{Error, Function, Lua, LuaOptions, ObjectLike, Result, StdLib, Table, Value, Vector, VmState};
 
 #[test]
 fn test_version() -> Result<()> {
@@ -15,92 +14,16 @@ fn test_version() -> Result<()> {
     Ok(())
 }
 
-#[test]
-fn test_require() -> Result<()> {
-    // Ensure that require() is not available if package module is not loaded
-    let mut lua = Lua::new_with(StdLib::NONE, LuaOptions::default())?;
-    assert!(lua.globals().get::<Option<Value>>("require")?.is_none());
-    assert!(lua.globals().get::<Option<Value>>("package")?.is_none());
-
-    if cfg!(target_arch = "wasm32") {
-        // TODO: figure out why emscripten fails on file operations
-        // Also see https://github.com/rust-lang/rust/issues/119250
-        return Ok(());
-    }
-
-    lua = Lua::new();
-
-    // Check that require() can load stdlib modules (including `package`)
-    lua.load(
-        r#"
-        local math = require("math")
-        assert(math == _G.math, "math module does not match _G.math")
-        local package = require("package")
-        assert(package == _G.package, "package module does not match _G.package")
-    "#,
-    )
-    .exec()?;
-
-    let temp_dir = tempfile::tempdir().unwrap();
-    fs::write(
-        temp_dir.path().join("module.luau"),
-        r#"
-        counter = (counter or 0) + 1
-        return {
-            counter = counter,
-            error = function() error("test") end,
-        }
-    "#,
-    )?;
-
-    lua.globals()
-        .get::<Table>("package")?
-        .set("path", temp_dir.path().join("?.luau").to_string_lossy())?;
-
-    lua.load(
-        r#"
-        local module = require("module")
-        assert(module.counter == 1)
-        module = require("module")
-        assert(module.counter == 1)
-
-        local ok, err = pcall(module.error)
-        assert(not ok and string.find(err, "module.luau") ~= nil)
-    "#,
-    )
-    .exec()?;
-
-    // Require non-existent module
-    match lua.load("require('non-existent')").exec() {
-        Err(Error::RuntimeError(e)) if e.contains("module 'non-existent' not found") => {}
-        r => panic!("expected RuntimeError(...) with a specific message, got {r:?}"),
-    }
-
-    // Require binary module in safe mode
-    lua.globals()
-        .get::<Table>("package")?
-        .set("cpath", temp_dir.path().join("?.so").to_string_lossy())?;
-    fs::write(temp_dir.path().join("dylib.so"), "")?;
-    match lua.load("require('dylib')").exec() {
-        Err(Error::RuntimeError(e)) if cfg!(unix) && e.contains("module 'dylib' not found") => {
-            assert!(e.contains("dynamic libraries are disabled in safe mode"))
-        }
-        Err(Error::RuntimeError(e)) if e.contains("module 'dylib' not found") => {}
-        r => panic!("expected RuntimeError(...) with a specific message, got {r:?}"),
-    }
-
-    Ok(())
-}
-
 #[cfg(not(feature = "luau-vector4"))]
 #[test]
 fn test_vectors() -> Result<()> {
     let lua = Lua::new();
 
-    let v: Vector = lua
+    let v: Value = lua
         .load("vector.create(1, 2, 3) + vector.create(3, 2, 1)")
         .eval()?;
-    assert_eq!(v, [4.0, 4.0, 4.0]);
+    assert!(v.is_vector());
+    assert_eq!(v.as_vector().unwrap(), [4.0, 4.0, 4.0]);
 
     // Test conversion into Rust array
     let v: [f64; 3] = lua.load("vector.create(1, 2, 3)").eval()?;
@@ -137,10 +60,11 @@ fn test_vectors() -> Result<()> {
 fn test_vectors() -> Result<()> {
     let lua = Lua::new();
 
-    let v: Vector = lua
+    let v: Value = lua
         .load("vector.create(1, 2, 3, 4) + vector.create(4, 3, 2, 1)")
         .eval()?;
-    assert_eq!(v, [5.0, 5.0, 5.0, 5.0]);
+    assert!(v.is_vector());
+    assert_eq!(v.as_vector().unwrap(), [5.0, 5.0, 5.0, 5.0]);
 
     // Test conversion into Rust array
     let v: [f64; 4] = lua.load("vector.create(1, 2, 3, 4)").eval()?;
@@ -174,7 +98,6 @@ fn test_vectors() -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(feature = "luau-vector4"))]
 #[test]
 fn test_vector_metatable() -> Result<()> {
     let lua = Lua::new();
@@ -194,11 +117,13 @@ fn test_vector_metatable() -> Result<()> {
     "#,
         )
         .eval::<Table>()?;
-    vector_mt.set_metatable(Some(vector_mt.clone()));
+    vector_mt.set_metatable(Some(vector_mt.clone()))?;
     lua.set_type_metatable::<Vector>(Some(vector_mt.clone()));
     lua.globals().set("Vector3", vector_mt)?;
 
-    let compiler = Compiler::new().set_vector_lib("Vector3").set_vector_ctor("new");
+    let compiler = Compiler::new()
+        .set_vector_ctor("Vector3.new")
+        .set_vector_type("Vector3");
 
     // Test vector methods (fastcall)
     lua.load(
@@ -241,9 +166,9 @@ fn test_readonly_table() -> Result<()> {
     check_readonly_error(t.raw_pop::<Value>());
 
     // Special case
-    match catch_unwind(AssertUnwindSafe(|| t.set_metatable(None))) {
-        Ok(_) => panic!("expected panic, got nothing"),
-        Err(_) => {}
+    match t.set_metatable(None) {
+        Err(Error::RuntimeError(e)) if e.contains("attempt to modify a readonly table") => {}
+        r => panic!("expected RuntimeError(...) with a specific message, got {r:?}"),
     }
 
     Ok(())
@@ -270,6 +195,14 @@ fn test_sandbox() -> Result<()> {
     co.sandbox()?;
     assert_eq!(co.resume::<Option<i32>>(())?, Some(123));
 
+    // collectgarbage should be restricted in sandboxed mode
+    let collectgarbage = lua.globals().get::<Function>("collectgarbage")?;
+    for arg in ["collect", "stop", "restart", "step", "isrunning"] {
+        let err = collectgarbage.call::<()>(arg).err().unwrap().to_string();
+        assert!(err.contains("collectgarbage called with invalid option"));
+    }
+    assert!(collectgarbage.call::<f64>("count").unwrap() > 0.0);
+
     lua.sandbox(false)?;
 
     // Previously set variable `global` should be cleared now
@@ -278,6 +211,11 @@ fn test_sandbox() -> Result<()> {
     // Readonly flags should be cleared as well
     let table = lua.globals().get::<Table>("table")?;
     table.set("test", "test")?;
+
+    // collectgarbage should work now
+    for arg in ["collect", "stop", "restart", "count", "step", "isrunning"] {
+        collectgarbage.call::<()>(arg).unwrap();
+    }
 
     Ok(())
 }
@@ -384,22 +322,28 @@ fn test_interrupts() -> Result<()> {
         .into_function()?,
     )?;
     co.resume::<()>(())?;
-    assert_eq!(co.status(), ThreadStatus::Resumable);
+    assert!(co.is_resumable());
     let result: i32 = co.resume(())?;
     assert_eq!(result, 6);
     assert_eq!(yield_count.load(Ordering::Relaxed), 7);
-    assert_eq!(co.status(), ThreadStatus::Finished);
+    assert!(co.is_finished());
+
+    // Test no yielding at non-yieldable points
+    yield_count.store(0, Ordering::Relaxed);
+    let co = lua.create_thread(lua.create_function(|lua, arg: Value| {
+        (lua.load("return (function(x) return x end)(...)")).call::<Value>(arg)
+    })?)?;
+    let res = co.resume::<String>("abc")?;
+    assert_eq!(res, "abc".to_string());
+    assert_eq!(yield_count.load(Ordering::Relaxed), 3);
 
     //
     // Test errors in interrupts
     //
     lua.set_interrupt(|_| Err(Error::runtime("error from interrupt")));
     match f.call::<()>(()) {
-        Err(Error::CallbackError { cause, .. }) => match *cause {
-            Error::RuntimeError(ref m) if m == "error from interrupt" => {}
-            ref e => panic!("expected RuntimeError with a specific message, got {:?}", e),
-        },
-        r => panic!("expected CallbackError, got {:?}", r),
+        Err(Error::RuntimeError(ref msg)) => assert_eq!(msg, "error from interrupt"),
+        res => panic!("expected `RuntimeError` with a specific message, got {res:?}"),
     }
 
     lua.remove_interrupt();
@@ -408,7 +352,204 @@ fn test_interrupts() -> Result<()> {
 }
 
 #[test]
+fn test_interrupt_callback_drop() {
+    struct ReenterOnDrop(Lua);
+
+    impl Drop for ReenterOnDrop {
+        fn drop(&mut self) {
+            self.0
+                .load("local n = 0; for i = 1, 10 do n = n + i end")
+                .exec()
+                .unwrap();
+            self.0.set_app_data(());
+        }
+    }
+
+    for replace in [false, true] {
+        let lua = Lua::new();
+        let guard = ReenterOnDrop(lua.clone());
+        lua.set_interrupt(move |_| {
+            let _ = &guard;
+            panic!("called a callback during drop");
+        });
+        if replace {
+            lua.set_interrupt(|_| Ok(VmState::Continue));
+        } else {
+            lua.remove_interrupt();
+        }
+        assert_eq!(lua.remove_app_data::<()>(), Some(()));
+    }
+}
+
+#[test]
 fn test_fflags() {
     // We cannot really on any particular feature flag to be present
     assert!(Lua::set_fflag("UnknownFlag", true).is_err());
 }
+
+#[cfg(feature = "luau-jit")]
+#[test]
+fn test_jit_inliner() -> Result<()> {
+    let compiler = Compiler::new();
+    let bytecode = compiler.compile("return 42")?;
+
+    let lua = Lua::new();
+    lua.enable_jit(false);
+    lua.sandbox(true)?;
+    lua.set_jit_options(mlua::state::JitOptions::new().inliner(true));
+
+    // Enabling the inliner must not change global compiler flags.
+    assert_eq!(compiler.compile("return 42")?, bytecode);
+
+    // An inlinable helper called in a hot loop.
+    let sum = lua
+        .load(
+            r#"
+            local function add(a, b)
+                return a + b + 0.5
+            end
+            local function caller(a, b)
+                local sum = add(a, b)
+                return sum - 0.5
+            end
+            local sum = 0
+            for i = 1, 1000 do
+                sum = caller(sum, i)
+            end
+            return sum
+        "#,
+        )
+        .eval::<i64>()?;
+    assert_eq!(sum, 500500);
+
+    Ok(())
+}
+
+#[test]
+fn test_loadstring() -> Result<()> {
+    let lua = Lua::new();
+
+    let f = lua.load(r#"loadstring("return 123")"#).eval::<Function>()?;
+    assert_eq!(f.call::<i32>(())?, 123);
+
+    let err = lua
+        .load(r#"loadstring("retur 123", "chunk")"#) // typos:ignore
+        .exec()
+        .err()
+        .unwrap();
+    assert!(err.to_string().contains(
+        r#"syntax error: [string "chunk"]:1: Incomplete statement: expected assignment or a function call"#
+    ));
+
+    Ok(())
+}
+
+#[test]
+fn test_typeof_error() -> Result<()> {
+    let lua = Lua::new();
+
+    let err = Error::runtime("just a test error");
+    let res = lua.load("return typeof(...)").call::<String>(err)?;
+    assert_eq!(res, "error");
+
+    Ok(())
+}
+
+#[test]
+fn test_memory_category() -> Result<()> {
+    let lua = Lua::new();
+
+    lua.set_memory_category("main").unwrap();
+
+    // Invalid category names should be rejected
+    let err = lua.set_memory_category("invalid$");
+    assert!(err.is_err());
+
+    for i in 0..254 {
+        let name = format!("category_{}", i);
+        lua.set_memory_category(&name).unwrap();
+    }
+    // 255th category should fail
+    let err = lua.set_memory_category("category_254");
+    assert!(err.is_err());
+
+    Ok(())
+}
+
+#[test]
+#[cfg(not(any(all(target_arch = "wasm32", target_os = "unknown"), target_os = "wasi")))]
+fn test_heap_dump() -> Result<()> {
+    let lua = Lua::new();
+
+    // Assign a new memory category and create few objects
+    lua.set_memory_category("test_category")?;
+    let _t = lua.create_table()?;
+    let _ud = lua.create_any_userdata("hello, world")?;
+
+    let dump = lua.heap_dump()?;
+
+    assert!(dump.size() > 0);
+    let size_by_category = dump.size_by_category();
+    assert_eq!(size_by_category.len(), 2);
+    assert!(size_by_category.contains_key("test_category"));
+    assert!(size_by_category["main"] < dump.size());
+
+    // Check size by type within the category
+    let size_by_type = dump.size_by_type(Some("test_category"));
+    assert!(!size_by_type.is_empty());
+    assert!(size_by_type.contains_key("table"));
+    assert!(size_by_type.contains_key("userdata"));
+    // Try non-existent category
+    let size_by_type2 = dump.size_by_type(Some("non_existent_category"));
+    assert!(size_by_type2.is_empty());
+    // Remove category filter
+    let size_by_type_all = dump.size_by_type(None);
+    assert!(size_by_type.len() < size_by_type_all.len());
+
+    // Check size by userdata type within the category
+    let size_by_udtype = dump.size_by_userdata(Some("test_category"));
+    assert_eq!(size_by_udtype.len(), 1);
+    assert!(size_by_udtype.contains_key("&str"));
+    assert_eq!(size_by_udtype["&str"].0, 1);
+    // Try non-existent category
+    let size_by_udtype2 = dump.size_by_userdata(Some("non_existent_category"));
+    assert!(size_by_udtype2.is_empty());
+    // Remove category filter
+    let size_by_udtype_all = dump.size_by_userdata(None);
+    assert!(size_by_udtype.len() < size_by_udtype_all.len());
+
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_integer64_type() -> Result<()> {
+    // Isolate process-global flag changes from other tests' VMs and compilers.
+    if std::env::var_os("MLUA_TEST_INTEGER64_TYPE").is_none() {
+        assert!(
+            std::process::Command::new(std::env::current_exe()?)
+                .args(["--exact", "test_integer64_type"])
+                .env("MLUA_TEST_INTEGER64_TYPE", "1")
+                .status()?
+                .success()
+        );
+        return Ok(());
+    }
+
+    _ = Lua::set_fflag("LuauIntegerType2", true);
+    let lua = Lua::new();
+
+    let integer_lib = lua.globals().get::<Table>("integer")?;
+    let n = integer_lib.call_function::<i64>("create", 42)?;
+    assert_eq!(n, 42);
+
+    let n: i64 = lua.load("return 42i").eval()?;
+    assert_eq!(n, 42);
+    let n: i64 = lua.load("return -42i").eval()?;
+    assert_eq!(n, -42);
+
+    Ok(())
+}
+
+#[path = "luau/require.rs"]
+mod require;

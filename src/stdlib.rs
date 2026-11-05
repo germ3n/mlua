@@ -1,4 +1,4 @@
-use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign};
+use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Not};
 
 /// Flags describing the set of lua standard libraries to load.
 #[derive(Copy, Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -6,9 +6,23 @@ pub struct StdLib(u32);
 
 impl StdLib {
     /// [`coroutine`](https://www.lua.org/manual/5.4/manual.html#6.2) library
-    ///
-    /// Requires `feature = "lua54/lua53/lua52/luau"`
-    #[cfg(any(feature = "lua54", feature = "lua53", feature = "lua52", feature = "luau"))]
+    #[cfg(any(
+        feature = "lua55",
+        feature = "lua54",
+        feature = "lua53",
+        feature = "lua52",
+        feature = "luau"
+    ))]
+    #[cfg_attr(
+        docsrs,
+        doc(cfg(any(
+            feature = "lua55",
+            feature = "lua54",
+            feature = "lua53",
+            feature = "lua52",
+            feature = "luau"
+        )))
+    )]
     pub const COROUTINE: StdLib = StdLib(1);
 
     /// [`table`](https://www.lua.org/manual/5.4/manual.html#6.6) library
@@ -26,21 +40,27 @@ impl StdLib {
     pub const STRING: StdLib = StdLib(1 << 4);
 
     /// [`utf8`](https://www.lua.org/manual/5.4/manual.html#6.5) library
-    ///
-    /// Requires `feature = "lua54/lua53/luau"`
-    #[cfg(any(feature = "lua54", feature = "lua53", feature = "luau"))]
+    #[cfg(any(feature = "lua55", feature = "lua54", feature = "lua53", feature = "luau"))]
+    #[cfg_attr(
+        docsrs,
+        doc(cfg(any(feature = "lua55", feature = "lua54", feature = "lua53", feature = "luau")))
+    )]
     pub const UTF8: StdLib = StdLib(1 << 5);
 
     /// [`bit`](https://www.lua.org/manual/5.2/manual.html#6.7) library
-    ///
-    /// Requires `feature = "lua52/luajit/luau"`
     #[cfg(any(feature = "lua52", feature = "luajit", feature = "luau", doc))]
+    #[cfg_attr(
+        docsrs,
+        doc(cfg(any(feature = "lua52", feature = "luajit", feature = "luau")))
+    )]
     pub const BIT: StdLib = StdLib(1 << 6);
 
     /// [`math`](https://www.lua.org/manual/5.4/manual.html#6.7) library
     pub const MATH: StdLib = StdLib(1 << 7);
 
     /// [`package`](https://www.lua.org/manual/5.4/manual.html#6.3) library
+    #[cfg(not(feature = "luau"))]
+    #[cfg_attr(docsrs, doc(cfg(not(feature = "luau"))))]
     pub const PACKAGE: StdLib = StdLib(1 << 8);
 
     /// [`buffer`](https://luau.org/library#buffer-library) library
@@ -53,16 +73,17 @@ impl StdLib {
     #[cfg_attr(docsrs, doc(cfg(feature = "luau")))]
     pub const VECTOR: StdLib = StdLib(1 << 10);
 
+    /// [`integer`](https://luau.org/library#integer-library) library
+    #[cfg(any(feature = "luau", doc))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "luau")))]
+    pub const INTEGER: StdLib = StdLib(1 << 11);
+
     /// [`jit`](http://luajit.org/ext_jit.html) library
-    ///
-    /// Requires `feature = "luajit"`
     #[cfg(any(feature = "luajit", doc))]
     #[cfg_attr(docsrs, doc(cfg(feature = "luajit")))]
-    pub const JIT: StdLib = StdLib(1 << 11);
+    pub const JIT: StdLib = StdLib(1 << 12);
 
     /// (**unsafe**) [`ffi`](http://luajit.org/ext_ffi.html) library
-    ///
-    /// Requires `feature = "luajit"`
     #[cfg(any(feature = "luajit", doc))]
     #[cfg_attr(docsrs, doc(cfg(feature = "luajit")))]
     pub const FFI: StdLib = StdLib(1 << 30);
@@ -121,5 +142,12 @@ impl BitXor for StdLib {
 impl BitXorAssign for StdLib {
     fn bitxor_assign(&mut self, rhs: Self) {
         *self = StdLib(self.0 ^ rhs.0)
+    }
+}
+
+impl Not for StdLib {
+    type Output = Self;
+    fn not(self) -> Self::Output {
+        StdLib(!self.0)
     }
 }

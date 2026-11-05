@@ -1,31 +1,41 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 
-use mlua::{Lua, Result, String};
+use mlua::{Lua, LuaString, Result};
 
 #[test]
 fn test_string_compare() {
-    fn with_str<F: FnOnce(String)>(s: &str, f: F) {
-        f(Lua::new().create_string(s).unwrap());
+    let lua = Lua::new();
+
+    fn with_str<F: FnOnce(LuaString)>(lua: &Lua, s: &str, f: F) {
+        f(lua.create_string(s).unwrap());
     }
 
     // Tests that all comparisons we want to have are usable
-    with_str("teststring", |t| assert_eq!(t, "teststring")); // &str
-    with_str("teststring", |t| assert_eq!(t, b"teststring")); // &[u8]
-    with_str("teststring", |t| assert_eq!(t, b"teststring".to_vec())); // Vec<u8>
-    with_str("teststring", |t| assert_eq!(t, "teststring".to_string())); // String
-    with_str("teststring", |t| assert_eq!(t, t)); // mlua::String
-    with_str("teststring", |t| assert_eq!(t, Cow::from(b"teststring".as_ref()))); // Cow (borrowed)
-    with_str("bla", |t| assert_eq!(t, Cow::from(b"bla".to_vec()))); // Cow (owned)
+    with_str(&lua, "teststring", |t| assert_eq!(t, "teststring")); // &str
+    with_str(&lua, "teststring", |t| assert_eq!(t, b"teststring")); // &[u8]
+    with_str(&lua, "teststring", |t| assert_eq!(t, b"teststring".to_vec())); // Vec<u8>
+    with_str(&lua, "teststring", |t| assert_eq!(t, "teststring".to_string())); // String
+    with_str(&lua, "teststring", |t| assert_eq!(t, t)); // mlua::String
+    with_str(&lua, "teststring", |t| {
+        assert_eq!(t, Cow::from(b"teststring".as_ref())) // Cow (borrowed)
+    });
+    with_str(&lua, "bla", |t| assert_eq!(t, Cow::from(b"bla".to_vec()))); // Cow (owned)
 
     // Test ordering
-    with_str("a", |a| {
+    with_str(&lua, "a", |a| {
         assert!(!(a < a));
         assert!(!(a > a));
     });
-    with_str("a", |a| assert!(a < "b"));
-    with_str("a", |a| assert!(a < b"b"));
-    with_str("a", |a| with_str("b", |b| assert!(a < b)));
+    with_str(&lua, "a", |a| assert!(a < "b"));
+    with_str(&lua, "a", |a| assert!(a < b"b"));
+    with_str(&lua, "a", |a| with_str(&lua, "b", |b| assert!(a < b)));
+
+    // Long strings (not interned by Lua)
+    let long_str = "abc".repeat(100);
+    with_str(&lua, &long_str, |s1| {
+        with_str(&lua, &long_str, |s2| assert_eq!(s1, s2))
+    });
 }
 
 #[test]
@@ -42,9 +52,9 @@ fn test_string_views() -> Result<()> {
     .exec()?;
 
     let globals = lua.globals();
-    let ok: String = globals.get("ok")?;
-    let err: String = globals.get("err")?;
-    let empty: String = globals.get("empty")?;
+    let ok: LuaString = globals.get("ok")?;
+    let err: LuaString = globals.get("err")?;
+    let empty: LuaString = globals.get("empty")?;
 
     assert_eq!(ok.to_str()?, "null bytes are valid utf-8, wh\0 knew?");
     assert_eq!(ok.to_string_lossy(), "null bytes are valid utf-8, wh\0 knew?");
@@ -64,7 +74,7 @@ fn test_string_views() -> Result<()> {
 fn test_string_from_bytes() -> Result<()> {
     let lua = Lua::new();
 
-    let rs = lua.create_string(&[0, 1, 2, 3, 0, 1, 2, 3])?;
+    let rs = lua.create_string([0, 1, 2, 3, 0, 1, 2, 3])?;
     assert_eq!(rs.as_bytes(), &[0, 1, 2, 3, 0, 1, 2, 3]);
 
     Ok(())
@@ -74,7 +84,8 @@ fn test_string_from_bytes() -> Result<()> {
 fn test_string_hash() -> Result<()> {
     let lua = Lua::new();
 
-    let set: HashSet<String> = lua.load(r#"{"hello", "world", "abc", 321}"#).eval()?;
+    #[allow(clippy::mutable_key_type)] // Lua strings are immutable despite their owning handle.
+    let set: HashSet<LuaString> = lua.load(r#"{"hello", "world", "abc", 321}"#).eval()?;
     assert_eq!(set.len(), 4);
     assert!(set.contains(&lua.create_string("hello")?));
     assert!(set.contains(&lua.create_string("world")?));
@@ -133,13 +144,42 @@ fn test_string_display() -> Result<()> {
 fn test_string_wrap() -> Result<()> {
     let lua = Lua::new();
 
-    let s = String::wrap("hello, world");
+    let s = LuaString::wrap("hello, world");
     lua.globals().set("s", s)?;
-    assert_eq!(lua.globals().get::<String>("s")?, "hello, world");
+    assert_eq!(lua.globals().get::<LuaString>("s")?, "hello, world");
 
-    let s2 = String::wrap("hello, world (owned)".to_string());
+    let s2 = LuaString::wrap("hello, world (owned)".to_string());
     lua.globals().set("s2", s2)?;
-    assert_eq!(lua.globals().get::<String>("s2")?, "hello, world (owned)");
+    assert_eq!(lua.globals().get::<LuaString>("s2")?, "hello, world (owned)");
+
+    Ok(())
+}
+
+#[test]
+fn test_bytes_into_iter() -> Result<()> {
+    let lua = Lua::new();
+
+    let s = lua.create_string("hello")?;
+    let bytes = s.as_bytes();
+
+    for (i, &b) in bytes.into_iter().enumerate() {
+        assert_eq!(b, s.as_bytes()[i]);
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "lua55")]
+#[test]
+fn test_external_string() -> Result<()> {
+    let lua = Lua::new();
+
+    let s = lua.create_external_string(b"abc\0")?;
+    assert_eq!(
+        s.as_bytes(),
+        b"abc\0",
+        "Trailing null byte should be preserved if present explicitly"
+    );
 
     Ok(())
 }

@@ -1,16 +1,16 @@
 use std::os::raw::c_int;
-use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::ptr;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::ptr::{self, NonNull};
 use std::sync::Arc;
 
 use crate::error::{Error, Result};
 use crate::state::{ExtraData, RawLua};
-use crate::util::{self, get_internal_metatable, WrappedFailure};
+use crate::util::{self, WrappedFailure, get_internal_metatable};
 
-pub(super) struct StateGuard<'a>(&'a RawLua, *mut ffi::lua_State);
+struct StateGuard<'a>(&'a RawLua, *mut ffi::lua_State);
 
 impl<'a> StateGuard<'a> {
-    pub(super) fn new(inner: &'a RawLua, mut state: *mut ffi::lua_State) -> Self {
+    fn new(inner: &'a RawLua, mut state: *mut ffi::lua_State) -> Self {
         state = inner.state.replace(state);
         Self(inner, state)
     }
@@ -23,10 +23,11 @@ impl Drop for StateGuard<'_> {
 }
 
 // An optimized version of `callback_error` that does not allocate `WrappedFailure` userdata
-// and instead reuses unsed values from previous calls (or allocates new).
-pub(super) unsafe fn callback_error_ext<F, R>(
+// and instead reuses unused values from previous calls (or allocates new).
+pub(crate) unsafe fn callback_error_ext<F, R>(
     state: *mut ffi::lua_State,
     mut extra: *mut ExtraData,
+    wrap_error: bool,
     f: F,
 ) -> R
 where
@@ -39,25 +40,33 @@ where
     let nargs = ffi::lua_gettop(state);
 
     enum PreallocatedFailure {
-        New(*mut WrappedFailure),
+        New(NonNull<WrappedFailure>),
         Reserved,
     }
 
     impl PreallocatedFailure {
+        #[inline(always)]
         unsafe fn reserve(state: *mut ffi::lua_State, extra: *mut ExtraData) -> Self {
             if (*extra).wrapped_failure_top > 0 {
                 (*extra).wrapped_failure_top -= 1;
                 return PreallocatedFailure::Reserved;
             }
 
+            Self::reserve_new(state)
+        }
+
+        #[cold]
+        #[inline(never)]
+        unsafe fn reserve_new(state: *mut ffi::lua_State) -> Self {
             // We need to check stack for Luau in case when callback is called from interrupt
-            // See https://github.com/Roblox/luau/issues/446 and mlua #142 and #153
+            // See https://github.com/luau-lang/luau/issues/446 and mlua #142 and #153
             #[cfg(feature = "luau")]
             ffi::lua_rawcheckstack(state, 2);
             // Place it to the beginning of the stack
             let ud = WrappedFailure::new_userdata(state);
             ffi::lua_insert(state, 1);
-            PreallocatedFailure::New(ud)
+            // Lua raises an error on allocation failure instead of returning null
+            PreallocatedFailure::New(NonNull::new_unchecked(ud))
         }
 
         #[cold]
@@ -66,7 +75,7 @@ where
             match *self {
                 PreallocatedFailure::New(ud) => {
                     ffi::lua_settop(state, 1);
-                    ud
+                    ud.as_ptr()
                 }
                 PreallocatedFailure::Reserved => {
                     let index = (*extra).wrapped_failure_pool.pop().unwrap();
@@ -82,17 +91,23 @@ where
             }
         }
 
+        #[inline(always)]
         unsafe fn release(self, state: *mut ffi::lua_State, extra: *mut ExtraData) {
-            let ref_thread = (*extra).ref_thread;
             match self {
-                PreallocatedFailure::New(_) => {
-                    ffi::lua_rotate(state, 1, -1);
-                    ffi::lua_xmove(state, ref_thread, 1);
-                    let index = ref_stack_pop(extra);
-                    (*extra).wrapped_failure_pool.push(index);
-                    (*extra).wrapped_failure_top += 1;
-                }
+                PreallocatedFailure::New(_) => Self::release_new(state, extra),
                 PreallocatedFailure::Reserved => (*extra).wrapped_failure_top += 1,
+            }
+        }
+
+        #[cold]
+        #[inline(never)]
+        unsafe fn release_new(state: *mut ffi::lua_State, extra: *mut ExtraData) {
+            let ref_thread = (*extra).ref_thread;
+            ffi::lua_rotate(state, 1, -1);
+            ffi::lua_xmove(state, ref_thread, 1);
+            if let Ok(index) = (*extra).try_ref_stack_pop() {
+                (*extra).wrapped_failure_pool.push(index);
+                (*extra).wrapped_failure_top += 1;
             }
         }
     }
@@ -101,32 +116,61 @@ where
     // to store a wrapped failure (error or panic) *before* we proceed.
     let prealloc_failure = PreallocatedFailure::reserve(state, extra);
 
-    match catch_unwind(AssertUnwindSafe(|| f(extra, nargs))) {
-        Ok(Ok(r)) => {
+    // Keep the Error payload out of catch_unwind return value
+    let mut callback_error = None;
+    match catch_unwind(AssertUnwindSafe(|| {
+        let rawlua = (*extra).raw_lua();
+        let _guard = StateGuard::new(rawlua, state);
+        match f(extra, nargs) {
+            Ok(result) => Some(result),
+            Err(err) => {
+                callback_error = Some(err);
+                None
+            }
+        }
+    })) {
+        Ok(Some(r)) => {
             // Return unused `WrappedFailure` to the pool
             prealloc_failure.release(state, extra);
             r
         }
-        Ok(Err(err)) => {
+        Ok(None) => {
+            let mut err = callback_error.take().unwrap();
             let wrapped_error = prealloc_failure.r#use(state, extra);
+            if wrap_error {
+                err = Error::CallbackError {
+                    traceback: String::new(),
+                    cause: Arc::new(err),
+                };
+            }
 
-            // Build `CallbackError` with traceback
-            let traceback = if ffi::lua_checkstack(state, ffi::LUA_TRACEBACK_STACK) != 0 {
-                ffi::luaL_traceback(state, state, ptr::null(), 0);
-                let traceback = util::to_string(state, -1);
-                ffi::lua_pop(state, 1);
-                traceback
-            } else {
-                "<not enough stack space for traceback>".to_string()
-            };
-            let cause = Arc::new(err);
-            ptr::write(
-                wrapped_error,
-                WrappedFailure::Error(Error::CallbackError { traceback, cause }),
-            );
+            // Store the error before traceback generation can fail or run GC.
+            ptr::write(wrapped_error, WrappedFailure::Error(err));
             get_internal_metatable::<WrappedFailure>(state);
             ffi::lua_setmetatable(state, -2);
 
+            if wrap_error {
+                if (*extra).raw_lua().unlikely_memory_error() {
+                    if ffi::lua_checkstack(state, ffi::LUA_TRACEBACK_STACK) != 0 {
+                        ffi::luaL_traceback(state, state, ptr::null(), 0);
+                    }
+                } else if let Err(p) = catch_unwind(AssertUnwindSafe(
+                    || protect_lua!(state, 0, 1, fn(state) ffi::luaL_traceback(state, state, ptr::null(), 1)),
+                )) {
+                    // Let Lua restore its frames before resuming a hook panic.
+                    *wrapped_error = WrappedFailure::Panic(Some(p));
+                }
+                if let WrappedFailure::Error(Error::CallbackError { traceback, .. }) = &mut *wrapped_error {
+                    // A successful call leaves the traceback above the stored error.
+                    *traceback = if ffi::lua_type(state, -1) == ffi::LUA_TSTRING {
+                        util::to_string(state, -1)
+                    } else {
+                        "<traceback unavailable>".to_string()
+                    };
+                }
+            }
+
+            ffi::lua_settop(state, 1);
             ffi::lua_error(state)
         }
         Err(p) => {
@@ -137,32 +181,4 @@ where
             ffi::lua_error(state)
         }
     }
-}
-
-pub(super) unsafe fn ref_stack_pop(extra: *mut ExtraData) -> c_int {
-    let extra = &mut *extra;
-    if let Some(free) = extra.ref_free.pop() {
-        ffi::lua_replace(extra.ref_thread, free);
-        return free;
-    }
-
-    // Try to grow max stack size
-    if extra.ref_stack_top >= extra.ref_stack_size {
-        let mut inc = extra.ref_stack_size; // Try to double stack size
-        while inc > 0 && ffi::lua_checkstack(extra.ref_thread, inc) == 0 {
-            inc /= 2;
-        }
-        if inc == 0 {
-            // Pop item on top of the stack to avoid stack leaking and successfully run destructors
-            // during unwinding.
-            ffi::lua_pop(extra.ref_thread, 1);
-            let top = extra.ref_stack_top;
-            // It is a user error to create enough references to exhaust the Lua max stack size for
-            // the ref thread.
-            panic!("cannot create a Lua reference, out of auxiliary stack space (used {top} slots)");
-        }
-        extra.ref_stack_size += inc;
-    }
-    extra.ref_stack_top += 1;
-    extra.ref_stack_top
 }

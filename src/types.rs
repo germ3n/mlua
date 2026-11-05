@@ -1,10 +1,9 @@
 use std::cell::UnsafeCell;
 use std::os::raw::{c_int, c_void};
-use std::rc::Rc;
 
-use crate::error::Result;
 #[cfg(not(feature = "luau"))]
-use crate::hook::Debug;
+use crate::debug::{Debug, HookTriggers};
+use crate::error::Result;
 use crate::state::{ExtraData, Lua, RawLua};
 
 // Re-export mutex wrappers
@@ -36,10 +35,13 @@ unsafe impl Send for LightUserData {}
 unsafe impl Sync for LightUserData {}
 
 #[cfg(feature = "send")]
-pub(crate) type Callback = Box<dyn Fn(&RawLua, c_int) -> Result<c_int> + Send + 'static>;
+type CallbackFn<'a> = dyn Fn(&RawLua, c_int) -> Result<c_int> + Send + 'a;
 
 #[cfg(not(feature = "send"))]
-pub(crate) type Callback = Box<dyn Fn(&RawLua, c_int) -> Result<c_int> + 'static>;
+type CallbackFn<'a> = dyn Fn(&RawLua, c_int) -> Result<c_int> + 'a;
+
+pub(crate) type Callback = Box<CallbackFn<'static>>;
+pub(crate) type CallbackPtr = *const CallbackFn<'static>;
 
 pub(crate) type ScopedCallback<'s> = Box<dyn Fn(&RawLua, c_int) -> Result<c_int> + 's>;
 
@@ -62,9 +64,10 @@ pub(crate) type AsyncCallback =
 pub(crate) type AsyncCallbackUpvalue = Upvalue<AsyncCallback>;
 
 #[cfg(feature = "async")]
-pub(crate) type AsyncPollUpvalue = Upvalue<BoxFuture<'static, Result<c_int>>>;
+pub(crate) type AsyncPollUpvalue = Upvalue<Option<BoxFuture<'static, Result<c_int>>>>;
 
 /// Type to set next Lua VM action after executing interrupt or hook function.
+#[non_exhaustive]
 pub enum VmState {
     Continue,
     /// Yield the current thread.
@@ -73,23 +76,37 @@ pub enum VmState {
     Yield,
 }
 
+#[cfg(not(feature = "luau"))]
+pub(crate) enum HookKind {
+    Global,
+    Thread(HookTriggers, HookCallback),
+}
+
 #[cfg(all(feature = "send", not(feature = "luau")))]
-pub(crate) type HookCallback = Rc<dyn Fn(&Lua, Debug) -> Result<VmState> + Send>;
+pub(crate) type HookCallback = XRc<dyn Fn(&Lua, &Debug) -> Result<VmState> + Send>;
 
 #[cfg(all(not(feature = "send"), not(feature = "luau")))]
-pub(crate) type HookCallback = Rc<dyn Fn(&Lua, Debug) -> Result<VmState>>;
+pub(crate) type HookCallback = XRc<dyn Fn(&Lua, &Debug) -> Result<VmState>>;
 
 #[cfg(all(feature = "send", feature = "luau"))]
-pub(crate) type InterruptCallback = Rc<dyn Fn(&Lua) -> Result<VmState> + Send>;
+pub(crate) type InterruptCallback = XRc<dyn Fn(&Lua) -> Result<VmState> + Send>;
 
 #[cfg(all(not(feature = "send"), feature = "luau"))]
-pub(crate) type InterruptCallback = Rc<dyn Fn(&Lua) -> Result<VmState>>;
+pub(crate) type InterruptCallback = XRc<dyn Fn(&Lua) -> Result<VmState>>;
 
-#[cfg(all(feature = "send", feature = "lua54"))]
-pub(crate) type WarnCallback = Box<dyn Fn(&Lua, &str, bool) -> Result<()> + Send>;
+#[cfg(feature = "send")]
+pub(crate) type ThreadEventCallback = XRc<dyn Fn(&Lua, crate::thread::ThreadEvent) -> Result<()> + Send>;
 
-#[cfg(all(not(feature = "send"), feature = "lua54"))]
-pub(crate) type WarnCallback = Box<dyn Fn(&Lua, &str, bool) -> Result<()>>;
+#[cfg(not(feature = "send"))]
+pub(crate) type ThreadEventCallback = XRc<dyn Fn(&Lua, crate::thread::ThreadEvent) -> Result<()>>;
+
+#[cfg(feature = "send")]
+#[cfg(any(feature = "lua55", feature = "lua54"))]
+pub(crate) type WarnCallback = XRc<dyn Fn(&Lua, &str, bool) -> Result<()> + Send>;
+
+#[cfg(not(feature = "send"))]
+#[cfg(any(feature = "lua55", feature = "lua54"))]
+pub(crate) type WarnCallback = XRc<dyn Fn(&Lua, &str, bool) -> Result<()>>;
 
 /// A trait that adds `Send` requirement if `send` feature is enabled.
 #[cfg(feature = "send")]
@@ -97,10 +114,27 @@ pub trait MaybeSend: Send {}
 #[cfg(feature = "send")]
 impl<T: Send> MaybeSend for T {}
 
+/// A trait that adds `Send` requirement if `send` feature is enabled.
 #[cfg(not(feature = "send"))]
 pub trait MaybeSend {}
 #[cfg(not(feature = "send"))]
 impl<T> MaybeSend for T {}
+
+/// Adds a `Sync` requirement to userdata types when the `send` feature is enabled.
+///
+/// It is automatically implemented for all applicable types.
+#[cfg(feature = "send")]
+pub trait MaybeSync: Sync {}
+#[cfg(feature = "send")]
+impl<T: Sync> MaybeSync for T {}
+
+/// Adds a `Sync` requirement to userdata types when the `send` feature is enabled.
+///
+/// It is automatically implemented for all applicable types.
+#[cfg(not(feature = "send"))]
+pub trait MaybeSync {}
+#[cfg(not(feature = "send"))]
+impl<T> MaybeSync for T {}
 
 pub(crate) struct DestructedUserdata;
 

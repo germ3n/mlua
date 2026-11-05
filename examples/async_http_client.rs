@@ -5,7 +5,7 @@ use hyper::body::Incoming;
 use hyper_util::client::legacy::Client as HyperClient;
 use hyper_util::rt::TokioExecutor;
 
-use mlua::{chunk, ExternalResult, Lua, Result, UserData, UserDataMethods};
+use mlua::{ExternalResult, Lua, Result, UserData, UserDataMethods, chunk};
 
 struct BodyReader(Incoming);
 
@@ -13,10 +13,10 @@ impl UserData for BodyReader {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         // Every call returns a next chunk
         methods.add_async_method_mut("read", |lua, mut reader, ()| async move {
-            if let Some(bytes) = reader.0.frame().await {
-                if let Some(bytes) = bytes.into_lua_err()?.data_ref() {
-                    return Some(lua.create_string(&bytes)).transpose();
-                }
+            if let Some(bytes) = reader.0.frame().await
+                && let Some(bytes) = bytes.into_lua_err()?.data_ref()
+            {
+                return Some(lua.create_string(bytes)).transpose();
             }
             Ok(None)
         });

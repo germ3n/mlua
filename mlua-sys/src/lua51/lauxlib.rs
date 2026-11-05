@@ -1,5 +1,6 @@
 //! Contains definitions from `lauxlib.h`.
 
+use std::marker::{PhantomData, PhantomPinned};
 use std::os::raw::{c_char, c_int, c_void};
 use std::ptr;
 
@@ -8,6 +9,9 @@ use super::lua::{self, lua_CFunction, lua_Integer, lua_Number, lua_State};
 // Extra error code for 'luaL_load'
 pub const LUA_ERRFILE: c_int = lua::LUA_ERRERR + 1;
 
+// Key, in the registry, for table of loaded modules
+pub const LUA_LOADED_TABLE: *const c_char = cstr!("_LOADED");
+
 #[repr(C)]
 pub struct luaL_Reg {
     pub name: *const c_char,
@@ -15,7 +19,7 @@ pub struct luaL_Reg {
 }
 
 #[cfg_attr(all(windows, raw_dylib), link(name = "lua51", kind = "raw-dylib"))]
-extern "C-unwind" {
+unsafe extern "C-unwind" {
     pub fn luaL_register(L: *mut lua_State, libname: *const c_char, l: *const luaL_Reg);
     #[link_name = "luaL_getmetafield"]
     pub fn luaL_getmetafield_(L: *mut lua_State, obj: c_int, e: *const c_char) -> c_int;
@@ -58,7 +62,7 @@ pub const LUA_NOREF: c_int = -2;
 pub const LUA_REFNIL: c_int = -1;
 
 #[cfg_attr(all(windows, raw_dylib), link(name = "lua51", kind = "raw-dylib"))]
-extern "C-unwind" {
+unsafe extern "C-unwind" {
     pub fn luaL_ref(L: *mut lua_State, t: c_int) -> c_int;
     pub fn luaL_unref(L: *mut lua_State, t: c_int, r#ref: c_int);
 
@@ -104,8 +108,6 @@ pub unsafe fn luaL_optstring(L: *mut lua_State, n: c_int, d: *const c_char) -> *
     luaL_optlstring(L, n, d, ptr::null_mut())
 }
 
-// Deprecated from 5.3: luaL_checkint, luaL_optint, luaL_checklong, luaL_optlong
-
 #[inline(always)]
 pub unsafe fn luaL_typename(L: *mut lua_State, i: c_int) -> *const c_char {
     lua::lua_typename(L, lua::lua_type(L, i))
@@ -135,8 +137,63 @@ pub unsafe fn luaL_getmetatable(L: *mut lua_State, n: *const c_char) {
     lua::lua_getfield_(L, lua::LUA_REGISTRYINDEX, n);
 }
 
-// TODO: luaL_opt
+#[inline(always)]
+pub unsafe fn luaL_opt<T>(
+    L: *mut lua_State,
+    f: unsafe extern "C-unwind" fn(*mut lua_State, c_int) -> T,
+    n: c_int,
+    d: T,
+) -> T {
+    if lua::lua_isnoneornil(L, n) != 0 {
+        d
+    } else {
+        f(L, n)
+    }
+}
 
 //
-// TODO: Generic Buffer Manipulation
+// Generic Buffer Manipulation
 //
+
+#[cfg(target_arch = "wasm32")]
+const BUFSIZ: usize = 1024; // WASI libc's BUFSIZ is 1024
+#[cfg(not(target_arch = "wasm32"))]
+const BUFSIZ: usize = libc::BUFSIZ as usize;
+
+// The buffer size used by the lauxlib buffer system.
+// The "16384" workaround is taken from the LuaJIT source code.
+pub const LUAL_BUFFERSIZE: usize = if BUFSIZ > 16384 { 8192 } else { BUFSIZ };
+
+#[repr(C)]
+pub struct luaL_Buffer {
+    pub p: *mut c_char, // current position in buffer
+    pub lvl: c_int,     // number of strings in the stack
+    pub L: *mut lua_State,
+    pub buffer: [c_char; LUAL_BUFFERSIZE],
+    _marker: PhantomData<PhantomPinned>,
+}
+
+#[cfg_attr(all(windows, raw_dylib), link(name = "lua51", kind = "raw-dylib"))]
+unsafe extern "C-unwind" {
+    pub fn luaL_buffinit(L: *mut lua_State, B: *mut luaL_Buffer);
+    pub fn luaL_prepbuffer(B: *mut luaL_Buffer) -> *mut c_char;
+    pub fn luaL_addlstring(B: *mut luaL_Buffer, s: *const c_char, l: usize);
+    pub fn luaL_addstring(B: *mut luaL_Buffer, s: *const c_char);
+    pub fn luaL_addvalue(B: *mut luaL_Buffer);
+    pub fn luaL_pushresult(B: *mut luaL_Buffer);
+}
+
+#[inline(always)]
+pub unsafe fn luaL_addchar(B: *mut luaL_Buffer, c: c_char) {
+    let buffer_end = (*B).buffer.as_mut_ptr().add(LUAL_BUFFERSIZE);
+    if (*B).p >= buffer_end {
+        luaL_prepbuffer(B);
+    }
+    *(*B).p = c;
+    (*B).p = (*B).p.add(1);
+}
+
+#[inline(always)]
+pub unsafe fn luaL_addsize(B: *mut luaL_Buffer, n: usize) {
+    (*B).p = (*B).p.add(n);
+}

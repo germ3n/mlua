@@ -20,14 +20,16 @@ fn main() {
             match lua.load(&line).eval::<MultiValue>() {
                 Ok(values) => {
                     editor.add_history_entry(line).unwrap();
-                    println!(
-                        "{}",
-                        values
-                            .iter()
-                            .map(|value| format!("{:#?}", value))
-                            .collect::<Vec<_>>()
-                            .join("\t")
-                    );
+                    if !values.is_empty() {
+                        println!(
+                            "{}",
+                            values
+                                .iter()
+                                .map(|value| format!("{:#?}", value))
+                                .collect::<Vec<_>>()
+                                .join("\t")
+                        );
+                    }
                     break;
                 }
                 Err(Error::SyntaxError {
@@ -35,7 +37,7 @@ fn main() {
                     ..
                 }) => {
                     // continue reading input and append it to `line`
-                    line.push_str("\n"); // separate input lines
+                    line.push('\n'); // separate input lines
                     prompt = ">> ";
                 }
                 Err(e) => {

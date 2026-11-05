@@ -21,4 +21,29 @@ fn test_compilation() {
     t.compile_fail("tests/compile/non_send.rs");
     #[cfg(not(feature = "send"))]
     t.pass("tests/compile/non_send.rs");
+
+    #[cfg(feature = "macros")]
+    {
+        t.compile_fail("tests/compile/chunk_dollar_non_ident.rs");
+        t.compile_fail("tests/compile/userdata_getter_and_meta.rs");
+        t.compile_fail("tests/compile/userdata_getter_and_setter.rs");
+        t.compile_fail("tests/compile/userdata_getter_mut_self.rs");
+        t.compile_fail("tests/compile/userdata_getter_extra_arg.rs");
+        t.compile_fail("tests/compile/userdata_setter_ref_self.rs");
+        t.compile_fail("tests/compile/userdata_mut_slice_arg.rs");
+        t.compile_fail("tests/compile/userdata_setter_no_value.rs");
+        t.compile_fail("tests/compile/userdata_static_with_self.rs");
+        t.compile_fail("tests/compile/userdata_meta_owned_self.rs");
+        t.compile_fail("tests/compile/userdata_destructuring_arg.rs");
+        t.compile_fail("tests/compile/userdata_generic_impl.rs");
+        t.compile_fail("tests/compile/userdata_const_getter.rs");
+        t.compile_fail("tests/compile/userdata_field_with_args.rs");
+    }
+
+    #[cfg(all(feature = "macros", feature = "async"))]
+    {
+        t.compile_fail("tests/compile/userdata_getter_async.rs");
+        t.compile_fail("tests/compile/userdata_setter_async.rs");
+        t.compile_fail("tests/compile/userdata_field_async.rs");
+    }
 }

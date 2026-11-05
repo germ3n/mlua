@@ -1,28 +1,27 @@
-use std::string::String as StdString;
-
+use crate::Function;
 use crate::error::{Error, Result};
+use crate::state::WeakLua;
 use crate::table::Table;
 use crate::traits::{FromLua, FromLuaMulti, IntoLua, IntoLuaMulti, ObjectLike};
 use crate::userdata::AnyUserData;
 use crate::value::Value;
-use crate::Function;
 
 #[cfg(feature = "async")]
-use futures_util::future::{self, Either, Future};
+use crate::function::AsyncCallFuture;
 
 impl ObjectLike for AnyUserData {
     #[inline]
     fn get<V: FromLua>(&self, key: impl IntoLua) -> Result<V> {
         // `lua_gettable` method used under the hood can work with any Lua value
         // that has `__index` metamethod
-        Table(self.0.copy()).get_protected(key)
+        Table(self.0.clone()).get_impl(key, true)
     }
 
     #[inline]
     fn set(&self, key: impl IntoLua, value: impl IntoLua) -> Result<()> {
         // `lua_settable` method used under the hood can work with any Lua value
         // that has `__newindex` metamethod
-        Table(self.0.copy()).set_protected(key, value)
+        Table(self.0.clone()).set_impl(key, value, true)
     }
 
     #[inline]
@@ -30,16 +29,16 @@ impl ObjectLike for AnyUserData {
     where
         R: FromLuaMulti,
     {
-        Function(self.0.copy()).call(args)
+        Function(self.0.clone()).call(args)
     }
 
     #[cfg(feature = "async")]
     #[inline]
-    fn call_async<R>(&self, args: impl IntoLuaMulti) -> impl Future<Output = Result<R>>
+    fn call_async<R>(&self, args: impl IntoLuaMulti) -> AsyncCallFuture<R>
     where
         R: FromLuaMulti,
     {
-        Function(self.0.copy()).call_async(args)
+        Function(self.0.clone()).call_async(args)
     }
 
     #[inline]
@@ -51,7 +50,7 @@ impl ObjectLike for AnyUserData {
     }
 
     #[cfg(feature = "async")]
-    fn call_async_method<R>(&self, name: &str, args: impl IntoLuaMulti) -> impl Future<Output = Result<R>>
+    fn call_async_method<R>(&self, name: &str, args: impl IntoLuaMulti) -> AsyncCallFuture<R>
     where
         R: FromLuaMulti,
     {
@@ -64,6 +63,8 @@ impl ObjectLike for AnyUserData {
     {
         match self.get(name)? {
             Value::Function(func) => func.call(args),
+            Value::Table(table) => table.call(args),
+            Value::UserData(ud) => ud.call(args),
             val => {
                 let msg = format!("attempt to call a {} value (function '{name}')", val.type_name());
                 Err(Error::RuntimeError(msg))
@@ -72,22 +73,34 @@ impl ObjectLike for AnyUserData {
     }
 
     #[cfg(feature = "async")]
-    fn call_async_function<R>(&self, name: &str, args: impl IntoLuaMulti) -> impl Future<Output = Result<R>>
+    fn call_async_function<R>(&self, name: &str, args: impl IntoLuaMulti) -> AsyncCallFuture<R>
     where
         R: FromLuaMulti,
     {
         match self.get(name) {
-            Ok(Value::Function(func)) => Either::Left(func.call_async(args)),
+            Ok(Value::Function(func)) => func.call_async(args),
+            Ok(Value::Table(table)) => table.call_async(args),
+            Ok(Value::UserData(ud)) => ud.call_async(args),
             Ok(val) => {
                 let msg = format!("attempt to call a {} value (function '{name}')", val.type_name());
-                Either::Right(future::ready(Err(Error::RuntimeError(msg))))
+                AsyncCallFuture::error(Error::RuntimeError(msg))
             }
-            Err(err) => Either::Right(future::ready(Err(err))),
+            Err(err) => AsyncCallFuture::error(err),
         }
     }
 
     #[inline]
-    fn to_string(&self) -> Result<StdString> {
-        Value::UserData(AnyUserData(self.0.copy())).to_string()
+    fn to_string(&self) -> Result<String> {
+        Value::UserData(self.clone()).to_string()
+    }
+
+    #[inline]
+    fn to_value(&self) -> Value {
+        Value::UserData(self.clone())
+    }
+
+    #[inline]
+    fn weak_lua(&self) -> &WeakLua {
+        &self.0.lua
     }
 }

@@ -18,16 +18,20 @@ pub(crate) struct MemoryState {
 }
 
 impl MemoryState {
+    #[cfg(feature = "luau")]
     #[inline]
     pub(crate) unsafe fn get(state: *mut ffi::lua_State) -> *mut Self {
         let mut mem_state = ptr::null_mut();
-        #[cfg(feature = "luau")]
-        {
-            ffi::lua_getallocf(state, &mut mem_state);
-            mlua_assert!(!mem_state.is_null(), "Luau state has no allocator userdata");
-        }
-        #[cfg(not(feature = "luau"))]
-        if ffi::lua_getallocf(state, &mut mem_state) != ALLOCATOR {
+        ffi::lua_getallocf(state, &mut mem_state);
+        mlua_assert!(!mem_state.is_null(), "Luau state has no allocator userdata");
+        mem_state as *mut MemoryState
+    }
+
+    #[cfg(not(feature = "luau"))]
+    #[inline]
+    pub(crate) unsafe fn get(state: *mut ffi::lua_State) -> *mut Self {
+        let mut mem_state = ptr::null_mut();
+        if !ptr::fn_addr_eq(ffi::lua_getallocf(state, &mut mem_state), ALLOCATOR) {
             mem_state = ptr::null_mut();
         }
         mem_state as *mut MemoryState
@@ -46,7 +50,7 @@ impl MemoryState {
     #[inline]
     pub(crate) fn set_memory_limit(&mut self, limit: usize) -> usize {
         let prev_limit = self.memory_limit;
-        self.memory_limit = limit as isize;
+        self.memory_limit = limit.min(isize::MAX as usize) as isize;
         prev_limit as usize
     }
 
@@ -86,7 +90,7 @@ impl MemoryState {
     }
 
     // Does nothing apart from calling `f()`, we don't need to bypass any limits
-    #[cfg(any(feature = "lua52", feature = "lua53", feature = "lua54"))]
+    #[cfg(any(feature = "lua55", feature = "lua54", feature = "lua53", feature = "lua52"))]
     #[inline]
     pub(crate) unsafe fn relax_limit_with(_state: *mut ffi::lua_State, f: impl FnOnce()) {
         f();
@@ -100,7 +104,7 @@ impl MemoryState {
     }
 }
 
-unsafe extern "C-unwind" fn allocator(
+unsafe extern "C" fn allocator(
     extra: *mut c_void,
     ptr: *mut c_void,
     osize: usize,
@@ -136,7 +140,7 @@ unsafe extern "C-unwind" fn allocator(
     // Luau enforces its own limit, by its own count; see `set_luau_memory_limit`.
     let mem_limit = if cfg!(feature = "luau") { 0 } else { mem_state.memory_limit };
     let new_used_memory = mem_state.used_memory + mem_diff;
-    if mem_limit > 0 && new_used_memory > mem_limit && !mem_state.ignore_limit {
+    if mem_diff > 0 && mem_limit > 0 && new_used_memory > mem_limit && !mem_state.ignore_limit {
         #[cfg(feature = "luau")]
         {
             mem_state.limit_reached = true;

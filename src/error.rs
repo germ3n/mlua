@@ -1,10 +1,14 @@
+//! Lua error handling.
+//!
+//! This module provides the [`Error`] type returned by all fallible `mlua` operations, together
+//! with extension traits for adapting Rust errors for use within Lua.
+
 use std::error::Error as StdError;
 use std::fmt;
 use std::io::Error as IoError;
 use std::net::AddrParseError;
 use std::result::Result as StdResult;
 use std::str::Utf8Error;
-use std::string::String as StdString;
 use std::sync::Arc;
 
 use crate::private::Sealed;
@@ -22,7 +26,7 @@ pub enum Error {
     /// Syntax error while parsing Lua source code.
     SyntaxError {
         /// The error message as returned by Lua.
-        message: StdString,
+        message: String,
         /// `true` if the error can likely be fixed by appending more input to the source code.
         ///
         /// This is useful for implementing REPLs as they can query the user for more input if this
@@ -34,20 +38,20 @@ pub enum Error {
     /// The Lua VM returns this error when a builtin operation is performed on incompatible types.
     /// Among other things, this includes invoking operators on wrong types (such as calling or
     /// indexing a `nil` value).
-    RuntimeError(StdString),
+    RuntimeError(String),
     /// Lua memory error, aka `LUA_ERRMEM`
     ///
     /// The Lua VM returns this error when the allocator does not return the requested memory, aka
     /// it is an out-of-memory error.
-    MemoryError(StdString),
+    MemoryError(String),
     /// Lua garbage collector error, aka `LUA_ERRGCMM`.
     ///
     /// The Lua VM returns this error when there is an error running a `__gc` metamethod.
     #[cfg(any(feature = "lua53", feature = "lua52", doc))]
     #[cfg_attr(docsrs, doc(cfg(any(feature = "lua53", feature = "lua52"))))]
-    GarbageCollectorError(StdString),
+    GarbageCollectorError(String),
     /// Potentially unsafe action in safe mode.
-    SafetyError(StdString),
+    SafetyError(String),
     /// Memory control is not available.
     ///
     /// This error can only happen when Lua state was not created by us and does not have the
@@ -80,22 +84,13 @@ pub enum Error {
     /// (which is stored in the corresponding field).
     BadArgument {
         /// Function that was called.
-        to: Option<StdString>,
+        to: Option<String>,
         /// Argument position (usually starts from 1).
         pos: usize,
         /// Argument name.
-        name: Option<StdString>,
+        name: Option<String>,
         /// Underlying error returned when converting argument to a Lua value.
         cause: Arc<Error>,
-    },
-    /// A Rust value could not be converted to a Lua value.
-    ToLuaConversionError {
-        /// Name of the Rust type that could not be converted.
-        from: String,
-        /// Name of the Lua type that could not be created.
-        to: &'static str,
-        /// A message indicating why the conversion failed in more detail.
-        message: Option<StdString>,
     },
     /// A Lua value could not be converted to the expected Rust type.
     FromLuaConversionError {
@@ -104,7 +99,7 @@ pub enum Error {
         /// Name of the Rust type that could not be created.
         to: String,
         /// A string containing more detailed error information.
-        message: Option<StdString>,
+        message: Option<String>,
     },
     /// [`Thread::resume`] was called on an unresumable coroutine.
     ///
@@ -154,17 +149,17 @@ pub enum Error {
     /// A [`MetaMethod`] operation is restricted (typically for `__gc` or `__metatable`).
     ///
     /// [`MetaMethod`]: crate::MetaMethod
-    MetaMethodRestricted(StdString),
+    MetaMethodRestricted(String),
     /// A [`MetaMethod`] (eg. `__index` or `__newindex`) has invalid type.
     ///
     /// [`MetaMethod`]: crate::MetaMethod
     MetaMethodTypeError {
         /// Name of the metamethod.
-        method: StdString,
+        method: String,
         /// Passed value type.
         type_name: &'static str,
         /// A string containing more detailed error information.
-        message: Option<StdString>,
+        message: Option<String>,
     },
     /// A [`RegistryKey`] produced from a different Lua state was used.
     ///
@@ -173,7 +168,7 @@ pub enum Error {
     /// A Rust callback returned `Err`, raising the contained `Error` as a Lua error.
     CallbackError {
         /// Lua call stack backtrace.
-        traceback: StdString,
+        traceback: String,
         /// Original error returned by the Rust code.
         cause: Arc<Error>,
     },
@@ -183,13 +178,13 @@ pub enum Error {
     /// and returned again.
     PreviouslyResumedPanic,
     /// Serialization error.
-    #[cfg(feature = "serialize")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "serialize")))]
-    SerializeError(StdString),
+    #[cfg(feature = "serde")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "serde")))]
+    SerializeError(String),
     /// Deserialization error.
-    #[cfg(feature = "serialize")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "serialize")))]
-    DeserializeError(StdString),
+    #[cfg(feature = "serde")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "serde")))]
+    DeserializeError(String),
     /// A custom error.
     ///
     /// This can be used for returning user-defined errors from callbacks.
@@ -201,7 +196,7 @@ pub enum Error {
     /// An error with additional context.
     WithContext {
         /// A string containing additional context.
-        context: StdString,
+        context: String,
         /// Underlying error.
         cause: Arc<Error>,
     },
@@ -225,7 +220,7 @@ impl fmt::Display for Error {
             }
             Error::SafetyError(msg) => {
                 write!(fmt, "safety error: {msg}")
-            },
+            }
             Error::MemoryControlNotAvailable => {
                 write!(fmt, "memory control is not available")
             }
@@ -238,10 +233,7 @@ impl fmt::Display for Error {
                 fmt,
                 "out of Lua stack, too many arguments to a Lua function or too many return values from a callback"
             ),
-            Error::BindError => write!(
-                fmt,
-                "too many arguments to Function::bind"
-            ),
+            Error::BindError => write!(fmt, "too many arguments to Function::bind"),
             Error::BadArgument { to, pos, name, cause } => {
                 if let Some(name) = name {
                     write!(fmt, "bad argument `{name}`")?;
@@ -252,13 +244,6 @@ impl fmt::Display for Error {
                     write!(fmt, " to `{to}`")?;
                 }
                 write!(fmt, ": {cause}")
-            },
-            Error::ToLuaConversionError { from, to, message } => {
-                write!(fmt, "error converting {from} to Lua {to}")?;
-                match message {
-                    None => Ok(()),
-                    Some(message) => write!(fmt, " ({message})"),
-                }
             }
             Error::FromLuaConversionError { from, to, message } => {
                 write!(fmt, "error converting Lua {from} to {to}")?;
@@ -273,7 +258,11 @@ impl fmt::Display for Error {
             Error::UserDataBorrowError => write!(fmt, "error borrowing userdata"),
             Error::UserDataBorrowMutError => write!(fmt, "error mutably borrowing userdata"),
             Error::MetaMethodRestricted(method) => write!(fmt, "metamethod {method} is restricted"),
-            Error::MetaMethodTypeError { method, type_name, message } => {
+            Error::MetaMethodTypeError {
+                method,
+                type_name,
+                message,
+            } => {
                 write!(fmt, "metamethod {method} has unsupported type {type_name}")?;
                 match message {
                     None => Ok(()),
@@ -286,7 +275,11 @@ impl fmt::Display for Error {
             Error::CallbackError { cause, traceback } => {
                 // Trace errors down to the root
                 let (mut cause, mut full_traceback) = (cause, None);
-                while let Error::CallbackError { cause: cause2, traceback: traceback2 } = &**cause {
+                while let Error::CallbackError {
+                    cause: cause2,
+                    traceback: traceback2,
+                } = &**cause
+                {
                     cause = cause2;
                     full_traceback = Some(traceback2);
                 }
@@ -297,7 +290,7 @@ impl fmt::Display for Error {
                     // Try to find local traceback within the full traceback
                     if let Some(pos) = full_traceback.find(traceback) {
                         write!(fmt, "{}", &full_traceback[..pos])?;
-                        writeln!(fmt, ">{}", &full_traceback[pos..].trim_end())?;
+                        writeln!(fmt, ">{}", full_traceback[pos..].trim_end())?;
                     } else {
                         writeln!(fmt, "{}", full_traceback.trim_end())?;
                     }
@@ -309,14 +302,14 @@ impl fmt::Display for Error {
             Error::PreviouslyResumedPanic => {
                 write!(fmt, "previously resumed panic returned again")
             }
-            #[cfg(feature = "serialize")]
+            #[cfg(feature = "serde")]
             Error::SerializeError(err) => {
                 write!(fmt, "serialize error: {err}")
-            },
-            #[cfg(feature = "serialize")]
+            }
+            #[cfg(feature = "serde")]
             Error::DeserializeError(err) => {
                 write!(fmt, "deserialize error: {err}")
-            },
+            }
             Error::ExternalError(err) => err.fmt(fmt),
             Error::WithContext { context, cause } => {
                 writeln!(fmt, "{context}")?;
@@ -332,8 +325,8 @@ impl StdError for Error {
             // An error type with a source error should either return that error via source or
             // include that source's error message in its own Display output, but never both.
             // https://blog.rust-lang.org/inside-rust/2021/07/01/What-the-error-handling-project-group-is-working-towards.html
-            // Given that we include source to fmt::Display implementation for `CallbackError`, this call
-            // returns nothing.
+            // Given that we include source to fmt::Display implementation for `CallbackError`, this
+            // call returns nothing.
             Error::CallbackError { .. } => None,
             Error::ExternalError(err) => err.source(),
             Error::WithContext { cause, .. } => Self::source(cause),
@@ -352,22 +345,35 @@ impl Error {
     /// Wraps an external error object.
     #[inline]
     pub fn external<T: Into<Box<DynStdError>>>(err: T) -> Self {
-        Error::ExternalError(err.into().into())
+        let boxed = err.into();
+        match boxed.downcast::<Self>() {
+            Ok(err) => *err,
+            Err(boxed) => Error::ExternalError(boxed.into()),
+        }
     }
 
-    /// Attempts to downcast the external error object to a concrete type by reference.
+    /// Attempts to downcast to a concrete external error type by reference.
+    ///
+    /// The search descends through wrapping layers following the same path as [`Error::chain`].
     pub fn downcast_ref<T>(&self) -> Option<&T>
     where
         T: StdError + 'static,
     {
         match self {
             Error::ExternalError(err) => err.downcast_ref(),
-            Error::WithContext { cause, .. } => Self::downcast_ref(cause),
+            Error::BadArgument { cause, .. }
+            | Error::CallbackError { cause, .. }
+            | Error::WithContext { cause, .. } => Self::downcast_ref(cause),
             _ => None,
         }
     }
 
-    /// An iterator over the chain of nested errors wrapped by this Error.
+    /// An iterator over the chain of nested errors wrapped by this `Error`.
+    ///
+    /// Iteration starts with `self` and descends through wrapping layers.
+    /// A bare [`Error::ExternalError`] wrapper is skipped in favor of the error it wraps.
+    /// The chain stops at the innermost error and does not follow the external error's own
+    /// [`StdError::source`] chain.
     pub fn chain(&self) -> impl Iterator<Item = &(dyn StdError + 'static)> {
         Chain {
             root: self,
@@ -394,6 +400,7 @@ impl Error {
         }
     }
 
+    #[inline]
     pub(crate) fn from_lua_conversion(
         from: &'static str,
         to: impl ToString,
@@ -494,14 +501,14 @@ impl From<Utf8Error> for Error {
     }
 }
 
-#[cfg(feature = "serialize")]
+#[cfg(feature = "serde")]
 impl serde::ser::Error for Error {
     fn custom<T: fmt::Display>(msg: T) -> Self {
         Self::SerializeError(msg.to_string())
     }
 }
 
-#[cfg(feature = "serialize")]
+#[cfg(feature = "serde")]
 impl serde::de::Error for Error {
     fn custom<T: fmt::Display>(msg: T) -> Self {
         Self::DeserializeError(msg.to_string())
@@ -561,10 +568,8 @@ impl<'a> Iterator for Chain<'a> {
 
 #[cfg(test)]
 mod assertions {
-    use super::*;
-
     #[cfg(not(feature = "error-send"))]
-    static_assertions::assert_not_impl_any!(Error: Send, Sync);
+    static_assertions::assert_not_impl_any!(super::Error: Send, Sync);
     #[cfg(feature = "send")]
-    static_assertions::assert_impl_all!(Error: Send, Sync);
+    static_assertions::assert_impl_all!(super::Error: Send, Sync);
 }

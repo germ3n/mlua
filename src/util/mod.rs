@@ -6,20 +6,17 @@ use std::{ptr, slice, str};
 use crate::error::{Error, Result};
 
 pub(crate) use error::{
-    error_traceback, error_traceback_thread, init_error_registry, pop_error, protect_lua_call,
-    protect_lua_closure, WrappedFailure,
+    WrappedFailure, error_traceback, error_traceback_thread, init_error_registry, pop_error,
+    protect_lua_call, protect_lua_closure,
 };
+pub(crate) use path::parse_path as parse_lookup_path;
 pub(crate) use short_names::short_type_name;
 pub(crate) use types::TypeKey;
 pub(crate) use userdata::{
-    get_destructed_userdata_metatable, get_internal_metatable, get_internal_userdata, get_userdata,
-    init_internal_metatable, init_userdata_metatable, push_internal_userdata, take_userdata,
-    DESTRUCTED_USERDATA_METATABLE,
+    DESTRUCTED_USERDATA_METATABLE, get_destructed_userdata_metatable, get_internal_metatable,
+    get_internal_userdata, get_userdata, init_internal_metatable, push_internal_userdata,
+    push_uninit_userdata, push_userdata, take_userdata,
 };
-
-#[cfg(not(feature = "luau"))]
-pub(crate) use userdata::push_uninit_userdata;
-pub(crate) use userdata::push_userdata;
 
 // Checks that Lua has enough free stack space for future stack operations. On failure, this will
 // panic with an internal error message.
@@ -89,28 +86,43 @@ impl Drop for StackGuard {
 #[inline(always)]
 pub(crate) unsafe fn push_string(state: *mut ffi::lua_State, s: &[u8], protect: bool) -> Result<()> {
     // Always use protected mode if the string is too long
-    if protect || s.len() > (1 << 30) {
-        protect_lua!(state, 0, 1, |state| {
-            ffi::lua_pushlstring(state, s.as_ptr() as *const c_char, s.len());
-        })
-    } else {
+    let protect = protect || s.len() >= const { 1 << 30 };
+    protect_lua_mem!(state, if protect, 0, 1, |state| {
         ffi::lua_pushlstring(state, s.as_ptr() as *const c_char, s.len());
-        Ok(())
+    })
+}
+
+// Uses 3 (or 1 if unprotected) stack spaces, does not call checkstack.
+#[cfg(feature = "lua55")]
+pub(crate) unsafe fn push_external_string(
+    state: *mut ffi::lua_State,
+    mut bytes: Vec<u8>,
+    protect: bool,
+) -> Result<()> {
+    bytes.push(0);
+    let s_len = bytes.len() - 1; // exclude null terminator
+    let s_ptr = bytes.as_ptr() as *const c_char;
+    let bytes_ud = Box::into_raw(Box::new(bytes));
+
+    unsafe extern "C" fn dealloc(ud: *mut c_void, _: *mut c_void, _: usize, _: usize) -> *mut c_void {
+        drop(Box::from_raw(ud as *mut Vec<u8>));
+        ptr::null_mut()
     }
+
+    // Lua frees the external string on error.
+    protect_lua_mem!(state, if protect, 0, 1, move |state| {
+        ffi::lua_pushexternalstring(state, s_ptr, s_len, Some(dealloc), bytes_ud as *mut _);
+    })
 }
 
 // Uses 3 stack spaces (when protect), does not call checkstack.
 #[cfg(feature = "luau")]
 #[inline(always)]
-pub(crate) unsafe fn push_buffer(state: *mut ffi::lua_State, b: &[u8], protect: bool) -> Result<()> {
-    let data = if protect {
-        protect_lua!(state, 0, 1, |state| ffi::lua_newbuffer(state, b.len()))?
-    } else {
-        ffi::lua_newbuffer(state, b.len())
-    };
-    let buf = slice::from_raw_parts_mut(data as *mut u8, b.len());
-    buf.copy_from_slice(b);
-    Ok(())
+pub(crate) unsafe fn push_buffer(state: *mut ffi::lua_State, size: usize, protect: bool) -> Result<*mut u8> {
+    let protect = protect || size > const { 1024 * 1024 * 1024 };
+    protect_lua_mem!(state, if protect, 0, 1, |state| {
+        ffi::lua_newbuffer(state, size) as *mut u8
+    })
 }
 
 // Uses 3 stack spaces, does not call checkstack.
@@ -123,12 +135,8 @@ pub(crate) unsafe fn push_table(
 ) -> Result<()> {
     let narr: c_int = narr.try_into().unwrap_or(c_int::MAX);
     let nrec: c_int = nrec.try_into().unwrap_or(c_int::MAX);
-    if protect {
-        protect_lua!(state, 0, 1, |state| ffi::lua_createtable(state, narr, nrec))
-    } else {
-        ffi::lua_createtable(state, narr, nrec);
-        Ok(())
-    }
+    let protect = protect || narr >= const { 1 << 26 } || nrec >= const { 1 << 26 };
+    protect_lua_mem!(state, if protect, 0, 1, |state| ffi::lua_createtable(state, narr, nrec))
 }
 
 // Uses 4 stack spaces, does not call checkstack.
@@ -222,7 +230,7 @@ pub(crate) unsafe extern "C-unwind" fn safe_xpcall(state: *mut ffi::lua_State) -
 // Returns Lua main thread for Lua >= 5.2 or checks that the passed thread is main for Lua 5.1.
 // Does not call lua_checkstack, uses 1 stack space.
 pub(crate) unsafe fn get_main_state(state: *mut ffi::lua_State) -> Option<*mut ffi::lua_State> {
-    #[cfg(any(feature = "lua54", feature = "lua53", feature = "lua52"))]
+    #[cfg(any(feature = "lua55", feature = "lua54", feature = "lua53", feature = "lua52"))]
     {
         ffi::lua_rawgeti(state, ffi::LUA_REGISTRYINDEX, ffi::LUA_RIDX_MAINTHREAD);
         let main_state = ffi::lua_tothread(state, -1);
@@ -234,11 +242,7 @@ pub(crate) unsafe fn get_main_state(state: *mut ffi::lua_State) -> Option<*mut f
         // Check the current state first
         let is_main_state = ffi::lua_pushthread(state) == 1;
         ffi::lua_pop(state, 1);
-        if is_main_state {
-            Some(state)
-        } else {
-            None
-        }
+        if is_main_state { Some(state) } else { None }
     }
     #[cfg(feature = "luau")]
     Some(ffi::lua_mainthread(state))
@@ -256,7 +260,7 @@ pub(crate) unsafe fn to_string(state: *mut ffi::lua_State, index: c_int) -> Stri
         }
         ffi::LUA_TNUMBER => {
             let mut isint = 0;
-            let i = ffi::lua_tointegerx(state, -1, &mut isint);
+            let i = ffi::lua_tointegerx(state, index, &mut isint);
             if isint == 0 {
                 ffi::lua_tonumber(state, index).to_string()
             } else {
@@ -323,13 +327,11 @@ pub(crate) unsafe fn ptr_to_lossy_str<'a>(input: *const c_char) -> Option<Cow<'a
 }
 
 pub(crate) fn linenumber_to_usize(n: c_int) -> Option<usize> {
-    match n {
-        n if n < 0 => None,
-        n => Some(n as usize),
-    }
+    usize::try_from(n).ok()
 }
 
 mod error;
+mod path;
 mod short_names;
 mod types;
 mod userdata;

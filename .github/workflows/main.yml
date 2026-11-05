@@ -9,12 +9,12 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         rust: [stable]
-        lua: [lua54, lua53, lua52, lua51, luajit, luau, luau-jit, luau-vector4]
+        lua: [lua55, lua54, lua53, lua52, lua51, luajit, luau, luau-jit, luau-vector4]
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
           - os: macos-latest
-            target: x86_64-apple-darwin
+            target: aarch64-apple-darwin
           - os: windows-latest
             target: x86_64-pc-windows-msvc
     steps:
@@ -27,31 +27,15 @@ jobs:
       - name: Build ${{ matrix.lua }} vendored
         run: |
           cargo build --features "${{ matrix.lua }},vendored"
-          cargo build --features "${{ matrix.lua }},vendored,async,serialize,macros,anyhow,userdata-wrappers"
-          cargo build --features "${{ matrix.lua }},vendored,async,serialize,macros,anyhow,userdata-wrappers,send"
+          cargo build --features "${{ matrix.lua }},vendored,async,serde,macros,anyhow,userdata-wrappers"
+          cargo build --features "${{ matrix.lua }},vendored,async,serde,macros,anyhow,userdata-wrappers,send"
         shell: bash
       - name: Build ${{ matrix.lua }} pkg-config
-        if: ${{ matrix.os == 'ubuntu-latest' }}
+        if: ${{ matrix.os == 'ubuntu-latest' && matrix.lua != 'lua55' }}
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends liblua5.4-dev liblua5.3-dev liblua5.2-dev liblua5.1-0-dev libluajit-5.1-dev
           cargo build --features "${{ matrix.lua }}"
-
-  build_aarch64_cross_macos:
-    name: Cross-compile to aarch64-apple-darwin
-    runs-on: macos-latest
-    needs: build
-    strategy:
-      matrix:
-        lua: [lua54, lua53, lua52, lua51, luajit]
-    steps:
-      - uses: actions/checkout@main
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable
-          target: aarch64-apple-darwin
-      - name: Cross-compile
-        run: cargo build --target aarch64-apple-darwin --features "${{ matrix.lua }},vendored,async,send,serialize,macros,anyhow,userdata-wrappers"
 
   build_aarch64_cross_ubuntu:
     name: Cross-compile to aarch64-unknown-linux-gnu
@@ -59,7 +43,7 @@ jobs:
     needs: build
     strategy:
       matrix:
-        lua: [lua54, lua53, lua52, lua51, luajit]
+        lua: [lua55, lua54, lua53, lua52, lua51, luajit]
     steps:
       - uses: actions/checkout@main
       - uses: dtolnay/rust-toolchain@stable
@@ -72,7 +56,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross
         shell: bash
       - name: Cross-compile
-        run: cargo build --target aarch64-unknown-linux-gnu --features "${{ matrix.lua }},vendored,async,send,serialize,macros,anyhow,userdata-wrappers"
+        run: cargo build --target aarch64-unknown-linux-gnu --features "${{ matrix.lua }},vendored,async,send,serde,macros,anyhow,userdata-wrappers"
         shell: bash
 
   build_armv7_cross_ubuntu:
@@ -81,7 +65,7 @@ jobs:
     needs: build
     strategy:
       matrix:
-        lua: [lua54, lua53, lua52, lua51]
+        lua: [lua55, lua54, lua53, lua52, lua51]
     steps:
       - uses: actions/checkout@main
       - uses: dtolnay/rust-toolchain@stable
@@ -94,7 +78,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends gcc-arm-linux-gnueabihf libc-dev-armhf-cross
         shell: bash
       - name: Cross-compile
-        run: cargo build --target armv7-unknown-linux-gnueabihf --features "${{ matrix.lua }},vendored,async,send,serialize,macros,anyhow,userdata-wrappers"
+        run: cargo build --target armv7-unknown-linux-gnueabihf --features "${{ matrix.lua }},vendored,async,send,serde,macros,anyhow,userdata-wrappers"
         shell: bash
 
   test:
@@ -105,12 +89,12 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         rust: [stable, nightly]
-        lua: [lua54, lua53, lua52, lua51, luajit, luajit52, luau, luau-jit, luau-vector4]
+        lua: [lua55, lua54, lua53, lua52, lua51, luajit, luajit52, luau, luau-jit, luau-vector4]
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
           - os: macos-latest
-            target: x86_64-apple-darwin
+            target: aarch64-apple-darwin
           - os: windows-latest
             target: x86_64-pc-windows-msvc
     steps:
@@ -123,14 +107,14 @@ jobs:
       - name: Run ${{ matrix.lua }} tests
         run: |
           cargo test --features "${{ matrix.lua }},vendored"
-          cargo test --features "${{ matrix.lua }},vendored,async,serialize,macros,anyhow,userdata-wrappers"
-          cargo test --features "${{ matrix.lua }},vendored,async,serialize,macros,anyhow,userdata-wrappers,send"
+          cargo test --features "${{ matrix.lua }},vendored,async,serde,macros,anyhow,userdata-wrappers"
+          cargo test --features "${{ matrix.lua }},vendored,async,serde,macros,anyhow,userdata-wrappers,send"
         shell: bash
-      - name: Run compile tests (macos lua54)
-        if: ${{ matrix.os == 'macos-latest' && matrix.lua == 'lua54' }}
+      - name: Run compile tests (macos lua55)
+        if: ${{ matrix.os == 'macos-latest' && matrix.lua == 'lua55' }}
         run: |
-          TRYBUILD=overwrite cargo test --features "${{ matrix.lua }},vendored" -- --ignored
-          TRYBUILD=overwrite cargo test --features "${{ matrix.lua }},vendored,async,send,serialize,macros" -- --ignored
+          TRYBUILD=overwrite cargo test --features "${{ matrix.lua }},vendored" --tests -- --ignored
+          TRYBUILD=overwrite cargo test --features "${{ matrix.lua }},vendored,async,send,serde,macros" --tests -- --ignored
         shell: bash
 
   test_with_sanitizer:
@@ -141,7 +125,7 @@ jobs:
       matrix:
         os: [ubuntu-latest]
         rust: [nightly]
-        lua: [lua54, lua53, lua52, lua51, luajit, luau, luau-jit, luau-vector4]
+        lua: [lua55, lua54, lua53, lua52, lua51, luajit, luau, luau-jit, luau-vector4]
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
@@ -154,8 +138,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Run ${{ matrix.lua }} tests with address sanitizer
         run: |
-          cargo test --tests --features "${{ matrix.lua }},vendored,async,serialize,macros,anyhow" --target x86_64-unknown-linux-gnu -- --skip test_too_many_recursions
-          cargo test --tests --features "${{ matrix.lua }},vendored,async,serialize,macros,anyhow,userdata-wrappers,send" --target x86_64-unknown-linux-gnu -- --skip test_too_many_recursions
+          cargo test --tests --features "${{ matrix.lua }},vendored,async,serde,macros,anyhow" --target x86_64-unknown-linux-gnu -- --skip test_too_many_recursions
+          cargo test --tests --features "${{ matrix.lua }},vendored,async,serde,macros,anyhow,userdata-wrappers,send" --target x86_64-unknown-linux-gnu -- --skip test_too_many_recursions
         shell: bash
         env:
           RUSTFLAGS: -Z sanitizer=address
@@ -168,7 +152,7 @@ jobs:
       matrix:
         os: [ubuntu-latest]
         rust: [nightly]
-        lua: [lua54, lua53, lua52, lua51, luajit, luau, luau-jit, luau-vector4]
+        lua: [lua55, lua54, lua53, lua52, lua51, luajit, luau, luau-jit, luau-vector4]
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
@@ -181,7 +165,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Run ${{ matrix.lua }} tests with forced memory limit
         run: |
-          cargo test --tests --features "${{ matrix.lua }},vendored,async,send,serialize,macros,anyhow,userdata-wrappers"
+          cargo test --tests --features "${{ matrix.lua }},vendored,async,send,serde,macros,anyhow,userdata-wrappers"
         shell: bash
         env:
           RUSTFLAGS: --cfg=force_memory_limit
@@ -194,12 +178,12 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
         rust: [stable]
-        lua: [lua54, lua53, lua52, lua51, luajit, luau]
+        lua: [lua55, lua54, lua53, lua52, lua51, luajit]
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
           - os: macos-latest
-            target: x86_64-apple-darwin
+            target: aarch64-apple-darwin
     steps:
       - uses: actions/checkout@main
       - uses: dtolnay/rust-toolchain@stable
@@ -219,7 +203,7 @@ jobs:
     needs: build
     strategy:
       matrix:
-        lua: [lua54, luajit]
+        lua: [lua55, lua54, luajit]
     defaults:
       run:
         shell: msys2 {0}
@@ -228,7 +212,7 @@ jobs:
       - uses: actions/checkout@main
       - name: Install Rust & Lua
         run: |
-          pacman -S --noconfirm mingw-w64-x86_64-rust mingw-w64-x86_64-lua mingw-w64-x86_64-luajit mingw-w64-x86_64-pkg-config
+          pacman -S --noconfirm mingw-w64-x86_64-rust mingw-w64-x86_64-lua54 mingw-w64-x86_64-lua mingw-w64-x86_64-luajit mingw-w64-x86_64-pkg-config
       - name: Run ${{ matrix.lua }} module tests
         run: |
           (cd tests/module && cargo build --release --features "${{ matrix.lua }}")
@@ -240,7 +224,7 @@ jobs:
     needs: build
     strategy:
       matrix:
-        lua: [lua54, lua53, lua52, lua51, luau]
+        lua: [lua55, lua54, lua53, lua52, lua51, luau]
     steps:
       - uses: actions/checkout@main
       - uses: dtolnay/rust-toolchain@stable
@@ -254,7 +238,52 @@ jobs:
       - name: Run ${{ matrix.lua }} tests
         run: |
           cargo test --tests --features "${{ matrix.lua }},vendored"
-          cargo test --tests --features "${{ matrix.lua }},vendored,async,serialize,macros,anyhow,userdata-wrappers"
+          cargo test --tests --features "${{ matrix.lua }},vendored,async,serde,macros,anyhow,userdata-wrappers"
+
+  test_wasm32_unknown:
+    name: Test on wasm32-unknown-unknown (${{ matrix.c_target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: build
+    strategy:
+      matrix:
+        lua: [lua55, lua54, lua53, lua52, lua51, luau]
+        c_target: [wasm32-wasip1, wasm32-wasip2]
+    steps:
+      - uses: actions/checkout@main
+      - uses: ./.github/actions/setup-wasm
+        with:
+          target: wasm32-unknown-unknown
+          c_target: ${{ matrix.c_target }}
+      - name: Run Wasm tests
+        run: bash tests/wasm/run.sh "${{ matrix.lua }}" "${{ matrix.c_target }}"
+
+  test_wasm32_wasi:
+    name: Test on ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: build
+    strategy:
+      matrix:
+        lua: [lua55, lua54, lua53, lua52, lua51, luau]
+        target: [wasm32-wasip1, wasm32-wasip2, wasm32-wasip3]
+        include:
+          # Stable Rust does not yet distribute the WASIp3 standard library.
+          - target: wasm32-wasip3
+            toolchain: nightly
+    steps:
+      - uses: actions/checkout@main
+      - uses: ./.github/actions/setup-wasm
+        with:
+          target: ${{ matrix.target }}
+          toolchain: ${{ matrix.toolchain || 'stable' }}
+      - name: Run Wasm tests
+        run: cargo test --manifest-path tests/wasm/Cargo.toml --target ${{ matrix.target }} --lib --features "${{ matrix.lua }}"
+      - name: Run full ${{ matrix.lua }} tests
+        if: ${{ matrix.target == 'wasm32-wasip2' && matrix.lua != 'luau' }}
+        run: |
+          cargo test --target wasm32-wasip2 --tests --features "${{ matrix.lua }},vendored"
+          cargo test --target wasm32-wasip2 --tests --features "${{ matrix.lua }},vendored,serde,macros,anyhow,userdata-wrappers"
 
   rustfmt:
     name: Rustfmt
@@ -264,14 +293,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt
-      - run: cargo fmt -- --check
+      - run: |
+          cargo fmt -- --check
+          cargo fmt --manifest-path tests/wasm/Cargo.toml -- --check
 
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        lua: [lua54, lua53, lua52, lua51, luajit, luau, luau-jit, luau-vector4]
+        lua: [lua55, lua54, lua53, lua52, lua51, luajit, luau, luau-jit, luau-vector4]
     steps:
       - uses: actions/checkout@main
       - uses: dtolnay/rust-toolchain@stable
@@ -281,4 +312,4 @@ jobs:
       - uses: giraffate/clippy-action@v1
         with:
           reporter: 'github-pr-review'
-          clippy_flags: --features "${{ matrix.lua }},vendored,async,send,serialize,macros,anyhow,userdata-wrappers"
+          clippy_flags: --features "${{ matrix.lua }},vendored,async,send,serde,macros,anyhow,userdata-wrappers"

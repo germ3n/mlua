@@ -1,6 +1,5 @@
-use std::collections::{vec_deque, VecDeque};
+use std::collections::{VecDeque, vec_deque};
 use std::iter::FromIterator;
-use std::mem;
 use std::ops::{Deref, DerefMut};
 use std::os::raw::c_int;
 use std::result::Result as StdResult;
@@ -126,8 +125,7 @@ impl MultiValue {
 
     /// Creates a `MultiValue` container from vector of values.
     ///
-    /// This methods needs *O*(*n*) data movement if the circular buffer doesn't happen to be at the
-    /// beginning of the allocation.
+    /// This method works in *O*(1) time and does not allocate any additional memory.
     #[inline]
     pub fn from_vec(vec: Vec<Value>) -> MultiValue {
         vec.into()
@@ -135,7 +133,8 @@ impl MultiValue {
 
     /// Consumes the `MultiValue` and returns a vector of values.
     ///
-    /// This methods works in *O*(1) time and does not allocate any additional memory.
+    /// This method needs *O*(*n*) data movement if the circular buffer doesn't happen to be at the
+    /// beginning of the allocation.
     #[inline]
     pub fn into_vec(self) -> Vec<Value> {
         self.into()
@@ -180,10 +179,8 @@ impl IntoIterator for MultiValue {
     type IntoIter = vec_deque::IntoIter<Value>;
 
     #[inline]
-    fn into_iter(mut self) -> Self::IntoIter {
-        let deque = mem::take(&mut self.0);
-        mem::forget(self);
-        deque.into_iter()
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
     }
 }
 
@@ -201,6 +198,23 @@ impl IntoLuaMulti for MultiValue {
     #[inline]
     fn into_lua_multi(self, _: &Lua) -> Result<MultiValue> {
         Ok(self)
+    }
+}
+
+impl IntoLuaMulti for &MultiValue {
+    #[inline]
+    fn into_lua_multi(self, _: &Lua) -> Result<MultiValue> {
+        Ok(self.clone())
+    }
+
+    #[inline]
+    unsafe fn push_into_stack_multi(self, lua: &RawLua) -> Result<c_int> {
+        let nresults = self.len() as i32;
+        check_stack(lua.state(), nresults + 1)?;
+        for value in &self.0 {
+            lua.push_value(value)?;
+        }
+        Ok(nresults)
     }
 }
 
@@ -296,6 +310,15 @@ impl<T: IntoLua> IntoLuaMulti for Variadic<T> {
     #[inline]
     fn into_lua_multi(self, lua: &Lua) -> Result<MultiValue> {
         MultiValue::from_lua_iter(lua, self)
+    }
+
+    unsafe fn push_into_stack_multi(self, lua: &RawLua) -> Result<c_int> {
+        let nresults = self.len() as i32;
+        check_stack(lua.state(), nresults + 1)?;
+        for value in self.0 {
+            value.push_into_stack(lua)?;
+        }
+        Ok(nresults)
     }
 }
 

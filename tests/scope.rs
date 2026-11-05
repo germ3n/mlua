@@ -1,10 +1,9 @@
 use std::cell::Cell;
 use std::rc::Rc;
-use std::string::String as StdString;
 use std::sync::Arc;
 
 use mlua::{
-    AnyUserData, Error, Function, Lua, MetaMethod, ObjectLike, Result, String, UserData, UserDataFields,
+    AnyUserData, Error, Function, Lua, LuaString, MetaMethod, ObjectLike, Result, UserData, UserDataFields,
     UserDataMethods, UserDataRegistry,
 };
 
@@ -235,12 +234,14 @@ fn test_scope_userdata_values() -> Result<()> {
 
 #[test]
 fn test_scope_userdata_mismatch() -> Result<()> {
-    struct MyUserData<'a>(&'a Cell<i64>);
+    struct MyUserData<'a>(&'a mut i64);
 
     impl<'a> UserData for MyUserData<'a> {
         fn register(reg: &mut UserDataRegistry<Self>) {
-            reg.add_method("inc", |_, data, ()| {
-                data.0.set(data.0.get() + 1);
+            reg.add_method("get", |_, data, ()| Ok(*data.0));
+
+            reg.add_method_mut("inc", |_, data, ()| {
+                *data.0 = data.0.wrapping_add(1);
                 Ok(())
             });
         }
@@ -251,30 +252,53 @@ fn test_scope_userdata_mismatch() -> Result<()> {
     lua.load(
         r#"
         function inc(a, b) a.inc(b) end
+        function get(a, b) a.get(b) end
     "#,
     )
     .exec()?;
 
-    let a = Cell::new(1);
-    let b = Cell::new(1);
+    let mut a = 1;
+    let mut b = 1;
 
-    let inc: Function = lua.globals().get("inc")?;
     lua.scope(|scope| {
-        let au = scope.create_userdata(MyUserData(&a))?;
-        let bu = scope.create_userdata(MyUserData(&b))?;
-        assert!(inc.call::<()>((&au, &au)).is_ok());
-        match inc.call::<()>((&au, &bu)) {
-            Err(Error::CallbackError { ref cause, .. }) => match cause.as_ref() {
-                Error::BadArgument { to, pos, name, cause } => {
-                    assert_eq!(to.as_deref(), Some("MyUserData.inc"));
-                    assert_eq!(*pos, 1);
-                    assert_eq!(name.as_deref(), Some("self"));
-                    assert!(matches!(*cause.as_ref(), Error::UserDataTypeMismatch));
-                }
+        let au = scope.create_userdata(MyUserData(&mut a))?;
+        let bu = scope.create_userdata(MyUserData(&mut b))?;
+        for method_name in ["get", "inc"] {
+            let f: Function = lua.globals().get(method_name)?;
+            let full_name = format!("MyUserData.{method_name}");
+            let full_name = full_name.as_str();
+
+            assert!(f.call::<()>((&au, &au)).is_ok());
+            match f.call::<()>((&au, &bu)) {
+                Err(Error::CallbackError { ref cause, .. }) => match cause.as_ref() {
+                    Error::BadArgument { to, pos, name, cause } => {
+                        assert_eq!(to.as_deref(), Some(full_name));
+                        assert_eq!(*pos, 1);
+                        assert_eq!(name.as_deref(), Some("self"));
+                        assert!(matches!(*cause.as_ref(), Error::UserDataTypeMismatch));
+                    }
+                    other => panic!("wrong error type {other:?}"),
+                },
+                Err(other) => panic!("wrong error type {other:?}"),
+                Ok(_) => panic!("incorrectly returned Ok"),
+            }
+
+            // Pass non-userdata type
+            let err = f.call::<()>((&au, 321)).err().unwrap();
+            match err {
+                Error::CallbackError { ref cause, .. } => match cause.as_ref() {
+                    Error::BadArgument { to, pos, name, cause } => {
+                        assert_eq!(to.as_deref(), Some(full_name));
+                        assert_eq!(*pos, 1);
+                        assert_eq!(name.as_deref(), Some("self"));
+                        assert!(matches!(*cause.as_ref(), Error::FromLuaConversionError { .. }));
+                    }
+                    other => panic!("wrong error type {other:?}"),
+                },
                 other => panic!("wrong error type {other:?}"),
-            },
-            Err(other) => panic!("wrong error type {other:?}"),
-            Ok(_) => panic!("incorrectly returned Ok"),
+            }
+            let err_msg = format!("bad argument `self` to `{full_name}`: error converting Lua number to userdata (expected userdata of type 'MyUserData')");
+            assert!(err.to_string().contains(&err_msg));
         }
         Ok(())
     })?;
@@ -318,7 +342,7 @@ fn test_scope_userdata_drop() -> Result<()> {
 
     let ud = lua.globals().get::<AnyUserData>("ud")?;
     match ud.borrow_scoped::<MyUserData, _>(|_| Ok::<_, Error>(())) {
-        Ok(_) => panic!("succesfull borrow for destructed userdata"),
+        Ok(_) => panic!("successful borrow for destructed userdata"),
         Err(Error::UserDataDestructed) => {}
         Err(err) => panic!("improper borrow error for destructed userdata: {err:?}"),
     }
@@ -327,6 +351,79 @@ fn test_scope_userdata_drop() -> Result<()> {
         Err(Error::UserDataDestructed) => {}
         Err(err) => panic!("improper metatable error for destructed userdata: {err:?}"),
     }
+
+    Ok(())
+}
+
+#[test]
+fn test_scope_escaped_methods() -> Result<()> {
+    let lua = Lua::new();
+
+    let (ud, get, set) = lua.scope(|scope| {
+        let ud = scope.create_any_userdata((), |reg| {
+            reg.add_method("get", |_, _, ()| Ok(42));
+            reg.add_method_mut("set", |_, _, ()| Ok(()));
+        })?;
+        let get = ud.get::<Function>("get")?;
+        let set = ud.get::<Function>("set")?;
+        assert_eq!(get.call::<i32>(&ud)?, 42);
+        set.call::<()>(&ud)?;
+        Ok((ud, get, set))
+    })?;
+    for method in [get, set] {
+        assert!(matches!(
+            method.call::<()>(&ud),
+            Err(Error::CallbackError { cause, .. })
+                if matches!(cause.as_ref(), Error::BadArgument { cause, .. }
+                    if matches!(cause.as_ref(), Error::UserDataDestructed))
+        ));
+    }
+
+    Ok(())
+}
+
+#[test]
+fn test_scope_teardown_registration() -> Result<()> {
+    struct OnDrop<F: FnOnce()>(Option<F>);
+    impl<F: FnOnce()> Drop for OnDrop<F> {
+        fn drop(&mut self) {
+            self.0.take().unwrap()();
+        }
+    }
+
+    struct Data;
+    impl UserData for Data {}
+
+    let lua = Lua::new();
+
+    let data = Data;
+    let (data_mut, any_mut) = (&mut Data, &mut Data);
+    let dropped = Cell::new(false);
+    lua.scope(|scope| {
+        let (data, dropped) = (&data, &dropped);
+        let guard = OnDrop(Some(move || {
+            let (data_mut, any_mut) = (data_mut, any_mut);
+            assert!(scope.create_function(|_, ()| Ok(())).is_err());
+            assert!(scope.create_function_mut(|_, ()| Ok(())).is_err());
+            assert!(scope.create_userdata_ref(data).is_err());
+            assert!(scope.create_userdata_ref_mut(data_mut).is_err());
+            assert!(scope.create_any_userdata_ref(data).is_err());
+            assert!(scope.create_any_userdata_ref_mut(any_mut).is_err());
+            assert!(scope.create_userdata(Data).is_err());
+            assert!(
+                scope
+                    .create_any_userdata(Data, |_| panic!("registration ran"))
+                    .is_err()
+            );
+            dropped.set(true);
+        }));
+        scope.create_function(move |_, ()| {
+            let _ = &guard;
+            Ok(())
+        })?;
+        Ok(())
+    })?;
+    assert!(dropped.get());
 
     Ok(())
 }
@@ -357,7 +454,8 @@ fn test_scope_userdata_ref() -> Result<()> {
         modify_userdata(&lua, &ud)?;
 
         // We can only borrow userdata scoped
-        assert!((matches!(ud.borrow::<MyUserData>(), Err(Error::UserDataTypeMismatch))));
+        #[rustfmt::skip]
+        assert!(matches!(ud.borrow::<MyUserData>(), Err(Error::UserDataTypeMismatch)));
         ud.borrow_scoped::<MyUserData, ()>(|ud_inst| {
             assert_eq!(ud_inst.0.get(), 2);
         })?;
@@ -394,7 +492,8 @@ fn test_scope_userdata_ref_mut() -> Result<()> {
         let ud = scope.create_userdata_ref_mut(&mut data)?;
         modify_userdata(&lua, &ud)?;
 
-        assert!((matches!(ud.borrow_mut::<MyUserData>(), Err(Error::UserDataTypeMismatch))));
+        #[rustfmt::skip]
+        assert!(matches!(ud.borrow_mut::<MyUserData>(), Err(Error::UserDataTypeMismatch)));
         ud.borrow_mut_scoped::<MyUserData, ()>(|ud_inst| {
             ud_inst.0 += 10;
         })?;
@@ -410,15 +509,15 @@ fn test_scope_userdata_ref_mut() -> Result<()> {
 fn test_scope_any_userdata() -> Result<()> {
     let lua = Lua::new();
 
-    fn register(reg: &mut UserDataRegistry<&mut StdString>) {
-        reg.add_method_mut("push", |_, this, s: String| {
+    fn register(reg: &mut UserDataRegistry<&mut String>) {
+        reg.add_method_mut("push", |_, this, s: LuaString| {
             this.push_str(&s.to_str()?);
             Ok(())
         });
         reg.add_meta_method("__tostring", |_, data, ()| Ok((*data).clone()));
     }
 
-    let mut data = StdString::from("foo");
+    let mut data = String::from("foo");
     lua.scope(|scope| {
         let ud = scope.create_any_userdata(&mut data, register)?;
         lua.globals().set("ud", ud)?;
@@ -500,11 +599,11 @@ fn test_scope_any_userdata_ref_mut() -> Result<()> {
 fn test_scope_destructors() -> Result<()> {
     let lua = Lua::new();
 
-    lua.register_userdata_type::<Arc<StdString>>(|reg| {
+    lua.register_userdata_type::<Arc<String>>(|reg| {
         reg.add_meta_method("__tostring", |_, data, ()| Ok(data.to_string()));
     })?;
 
-    let arc_str = Arc::new(StdString::from("foo"));
+    let arc_str = Arc::new(String::from("foo"));
 
     let ud = lua.create_any_userdata(arc_str.clone())?;
     lua.scope(|scope| {
@@ -517,7 +616,7 @@ fn test_scope_destructors() -> Result<()> {
 
     // Try destructing the userdata while it's borrowed
     let ud = lua.create_any_userdata(arc_str.clone())?;
-    ud.borrow_scoped::<Arc<StdString>, _>(|arc_str| {
+    ud.borrow_scoped::<Arc<String>, _>(|arc_str| {
         assert_eq!(arc_str.as_str(), "foo");
         lua.scope(|scope| {
             scope.add_destructor(|| {
@@ -542,4 +641,74 @@ fn modify_userdata(lua: &Lua, ud: &AnyUserData) -> Result<()> {
 "#,
     )
     .call(ud)
+}
+
+#[test]
+fn test_scope_callback_memory_error() -> Result<()> {
+    // Sweep allocation boundaries to cover failure after the callback upvalue is allocated.
+    for headroom in (0..256).step_by(8) {
+        let lua = Lua::new();
+        if cfg!(feature = "luajit") && lua.set_memory_limit(0).is_err() {
+            return Ok(());
+        }
+
+        lua.gc_collect()?;
+        lua.gc_stop();
+        lua.set_memory_limit(lua.used_memory() + headroom)?;
+
+        let arc = Arc::new(());
+        let _ = lua.scope(|scope| {
+            let data = arc.clone();
+            scope.create_function(move |_, ()| Ok(Arc::strong_count(&data)))
+        });
+        lua.set_memory_limit(0)?;
+        assert_eq!(Arc::strong_count(&arc), 1, "headroom={headroom}");
+    }
+
+    Ok(())
+}
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn test_scope_userdata_registration_panic() -> Result<()> {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    let lua = Lua::new();
+
+    let arc = Arc::new(());
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        lua.scope(|scope| scope.create_any_userdata(arc.clone(), |_| panic!("registration failed")))
+    }));
+    assert!(result.is_err());
+    assert_eq!(Arc::strong_count(&arc), 1);
+
+    Ok(())
+}
+
+#[test]
+#[cfg(feature = "send")]
+fn test_scope_func_send() -> Result<()> {
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    let lua = Lua::new();
+    let value = Cell::new(42);
+    let worker = lua.scope(|scope| {
+        let f = scope.create_function(|_, ()| Ok(value.get()))?;
+        let (tx, rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            tx.send(()).unwrap();
+            f.call::<i32>(())
+        });
+        rx.recv().unwrap();
+        // Let the worker block on the Lua lock before scope teardown.
+        thread::sleep(Duration::from_millis(10));
+        Ok(worker)
+    })?;
+    assert!(matches!(
+        worker.join().unwrap(),
+        Err(Error::CallbackError { cause, .. }) if matches!(*cause, Error::CallbackDestructed)
+    ));
+    Ok(())
 }

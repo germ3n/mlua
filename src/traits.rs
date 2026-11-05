@@ -1,17 +1,20 @@
+//! Core conversion and extension traits.
+//!
+//! This module provides the fundamental traits for converting values between Rust and Lua,
+//! and for defining native Lua callable functions.
+
 use std::os::raw::c_int;
-use std::string::String as StdString;
 use std::sync::Arc;
 
 use crate::error::{Error, Result};
 use crate::multi::MultiValue;
 use crate::private::Sealed;
-use crate::state::{Lua, RawLua};
-use crate::types::MaybeSend;
-use crate::util::{check_stack, short_type_name};
+use crate::state::{Lua, RawLua, WeakLua};
+use crate::util::{check_stack, parse_lookup_path, short_type_name};
 use crate::value::Value;
 
 #[cfg(feature = "async")]
-use std::future::Future;
+use crate::function::AsyncCallFuture;
 
 /// Trait for types convertible to [`Value`].
 pub trait IntoLua: Sized {
@@ -53,7 +56,7 @@ pub trait FromLua: Sized {
     #[doc(hidden)]
     #[inline]
     unsafe fn from_stack(idx: c_int, lua: &RawLua) -> Result<Self> {
-        Self::from_lua(lua.stack_value(idx, None), lua.lua())
+        Self::from_lua(lua.try_stack_value(idx, None)?, lua.lua())
     }
 
     /// Same as `from_lua_arg` but for a value in the Lua stack at index `idx`.
@@ -126,7 +129,7 @@ pub trait FromLuaMulti: Sized {
     unsafe fn from_stack_multi(nvals: c_int, lua: &RawLua) -> Result<Self> {
         let mut values = MultiValue::with_capacity(nvals as usize);
         for idx in 0..nvals {
-            values.push_back(lua.stack_value(-nvals + idx, None));
+            values.push_back(lua.try_stack_value(-nvals + idx, None)?);
         }
         Self::from_lua_multi(values, lua.lua())
     }
@@ -162,29 +165,27 @@ pub trait ObjectLike: Sealed {
     /// arguments.
     #[cfg(feature = "async")]
     #[cfg_attr(docsrs, doc(cfg(feature = "async")))]
-    fn call_async<R>(&self, args: impl IntoLuaMulti) -> impl Future<Output = Result<R>>
+    fn call_async<R>(&self, args: impl IntoLuaMulti) -> AsyncCallFuture<R>
     where
         R: FromLuaMulti;
 
-    /// Gets the function associated to key `name` from the object and calls it,
+    /// Gets the callable value associated to key `name` from the object and calls it,
     /// passing the object itself along with `args` as function arguments.
     fn call_method<R>(&self, name: &str, args: impl IntoLuaMulti) -> Result<R>
     where
         R: FromLuaMulti;
 
-    /// Gets the function associated to key `name` from the object and asynchronously calls it,
-    /// passing the object itself along with `args` as function arguments.
-    ///
-    /// Requires `feature = "async"`
+    /// Gets the callable value associated to key `name` from the object and asynchronously calls
+    /// it, passing the object itself along with `args` as function arguments.
     ///
     /// This might invoke the `__index` metamethod.
     #[cfg(feature = "async")]
     #[cfg_attr(docsrs, doc(cfg(feature = "async")))]
-    fn call_async_method<R>(&self, name: &str, args: impl IntoLuaMulti) -> impl Future<Output = Result<R>>
+    fn call_async_method<R>(&self, name: &str, args: impl IntoLuaMulti) -> AsyncCallFuture<R>
     where
         R: FromLuaMulti;
 
-    /// Gets the function associated to key `name` from the object and calls it,
+    /// Gets the callable value associated to key `name` from the object and calls it,
     /// passing `args` as function arguments.
     ///
     /// This might invoke the `__index` metamethod.
@@ -192,118 +193,65 @@ pub trait ObjectLike: Sealed {
     where
         R: FromLuaMulti;
 
-    /// Gets the function associated to key `name` from the object and asynchronously calls it,
-    /// passing `args` as function arguments.
-    ///
-    /// Requires `feature = "async"`
+    /// Gets the callable value associated to key `name` from the object and asynchronously calls
+    /// it, passing `args` as function arguments.
     ///
     /// This might invoke the `__index` metamethod.
     #[cfg(feature = "async")]
     #[cfg_attr(docsrs, doc(cfg(feature = "async")))]
-    fn call_async_function<R>(&self, name: &str, args: impl IntoLuaMulti) -> impl Future<Output = Result<R>>
+    fn call_async_function<R>(&self, name: &str, args: impl IntoLuaMulti) -> AsyncCallFuture<R>
     where
         R: FromLuaMulti;
+
+    /// Look up a value by a path of keys.
+    ///
+    /// The syntax is similar to accessing nested tables in Lua, with additional support for
+    /// `?` operator to perform safe navigation.
+    ///
+    /// For example, the path `a[1].c` is equivalent to `table.a[1].c` in Lua.
+    /// With `?` operator, `a[1]?.c` is equivalent to `table.a[1] and table.a[1].c or nil` in Lua.
+    ///
+    /// Bracket notation rules:
+    /// - `[123]` - integer keys
+    /// - `["string key"]` or `['string key']` - string keys (must be quoted)
+    /// - String keys support escape sequences: `\"`, `\'`, `\\`
+    fn get_path<V: FromLua>(&self, path: &str) -> Result<V> {
+        let mut current = self.to_value();
+        for (key, safe_nil) in parse_lookup_path(path)? {
+            current = match current {
+                Value::Table(table) => table.get::<Value>(key),
+                Value::UserData(ud) => ud.get::<Value>(key),
+                _ => {
+                    let type_name = current.type_name();
+                    let err = format!("attempt to index a {type_name} value with key '{key}'");
+                    Err(Error::runtime(err))
+                }
+            }?;
+            if safe_nil && (current == Value::Nil || current == Value::NULL) {
+                break;
+            }
+        }
+
+        let lua = self.weak_lua().lock();
+        V::from_lua(current, lua.lua())
+    }
 
     /// Converts the object to a string in a human-readable format.
     ///
     /// This might invoke the `__tostring` metamethod.
-    fn to_string(&self) -> Result<StdString>;
+    fn to_string(&self) -> Result<String>;
+
+    /// Converts the object to a Lua value.
+    fn to_value(&self) -> Value;
+
+    /// Gets a reference to the associated Lua state.
+    #[doc(hidden)]
+    fn weak_lua(&self) -> &WeakLua;
 }
-
-/// A trait for types that can be used as Lua functions.
-pub trait LuaNativeFn<A: FromLuaMulti> {
-    type Output: IntoLuaMulti;
-
-    fn call(&self, args: A) -> Self::Output;
-}
-
-/// A trait for types with mutable state that can be used as Lua functions.
-pub trait LuaNativeFnMut<A: FromLuaMulti> {
-    type Output: IntoLuaMulti;
-
-    fn call(&mut self, args: A) -> Self::Output;
-}
-
-/// A trait for types that returns a future and can be used as Lua functions.
-#[cfg(feature = "async")]
-pub trait LuaNativeAsyncFn<A: FromLuaMulti> {
-    type Output: IntoLuaMulti;
-
-    fn call(&self, args: A) -> impl Future<Output = Self::Output> + MaybeSend + 'static;
-}
-
-macro_rules! impl_lua_native_fn {
-    ($($A:ident),*) => {
-        impl<FN, $($A,)* R> LuaNativeFn<($($A,)*)> for FN
-        where
-            FN: Fn($($A,)*) -> R + MaybeSend + 'static,
-            ($($A,)*): FromLuaMulti,
-            R: IntoLuaMulti,
-        {
-            type Output = R;
-
-            #[allow(non_snake_case)]
-            fn call(&self, args: ($($A,)*)) -> Self::Output {
-                let ($($A,)*) = args;
-                self($($A,)*)
-            }
-        }
-
-        impl<FN, $($A,)* R> LuaNativeFnMut<($($A,)*)> for FN
-        where
-            FN: FnMut($($A,)*) -> R + MaybeSend + 'static,
-            ($($A,)*): FromLuaMulti,
-            R: IntoLuaMulti,
-        {
-            type Output = R;
-
-            #[allow(non_snake_case)]
-            fn call(&mut self, args: ($($A,)*)) -> Self::Output {
-                let ($($A,)*) = args;
-                self($($A,)*)
-            }
-        }
-
-        #[cfg(feature = "async")]
-        impl<FN, $($A,)* Fut, R> LuaNativeAsyncFn<($($A,)*)> for FN
-        where
-            FN: Fn($($A,)*) -> Fut + MaybeSend + 'static,
-            ($($A,)*): FromLuaMulti,
-            Fut: Future<Output = R> + MaybeSend + 'static,
-            R: IntoLuaMulti,
-        {
-            type Output = R;
-
-            #[allow(non_snake_case)]
-            fn call(&self, args: ($($A,)*)) -> impl Future<Output = Self::Output> + MaybeSend + 'static {
-                let ($($A,)*) = args;
-                self($($A,)*)
-            }
-        }
-    };
-}
-
-impl_lua_native_fn!();
-impl_lua_native_fn!(A);
-impl_lua_native_fn!(A, B);
-impl_lua_native_fn!(A, B, C);
-impl_lua_native_fn!(A, B, C, D);
-impl_lua_native_fn!(A, B, C, D, E);
-impl_lua_native_fn!(A, B, C, D, E, F);
-impl_lua_native_fn!(A, B, C, D, E, F, G);
-impl_lua_native_fn!(A, B, C, D, E, F, G, H);
-impl_lua_native_fn!(A, B, C, D, E, F, G, H, I);
-impl_lua_native_fn!(A, B, C, D, E, F, G, H, I, J);
-impl_lua_native_fn!(A, B, C, D, E, F, G, H, I, J, K);
-impl_lua_native_fn!(A, B, C, D, E, F, G, H, I, J, K, L);
-impl_lua_native_fn!(A, B, C, D, E, F, G, H, I, J, K, L, M);
-impl_lua_native_fn!(A, B, C, D, E, F, G, H, I, J, K, L, M, N);
-impl_lua_native_fn!(A, B, C, D, E, F, G, H, I, J, K, L, M, N, O);
-impl_lua_native_fn!(A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P);
 
 pub(crate) trait ShortTypeName {
     #[inline(always)]
-    fn type_name() -> StdString {
+    fn type_name() -> String {
         short_type_name::<Self>()
     }
 }

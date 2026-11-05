@@ -1,11 +1,12 @@
-#![cfg(feature = "serialize")]
+#![cfg(feature = "serde")]
 
 use std::collections::HashMap;
 use std::error::Error as StdError;
 
+use bstr::BString;
+use mlua::serde::{DeserializeOptions, SerializeOptions};
 use mlua::{
-    AnyUserData, DeserializeOptions, Error, ExternalResult, IntoLua, Lua, LuaSerdeExt, Result as LuaResult,
-    SerializeOptions, UserData, Value,
+    AnyUserData, Error, ExternalResult, IntoLua, Lua, LuaSerdeExt, Result as LuaResult, UserData, Value,
 };
 use serde::{Deserialize, Serialize};
 
@@ -24,7 +25,7 @@ fn test_serialize() -> Result<(), Box<dyn StdError>> {
     globals.set("null", lua.null())?;
 
     let empty_array = lua.create_table()?;
-    empty_array.set_metatable(Some(lua.array_metatable()));
+    empty_array.set_metatable(Some(lua.array_metatable()))?;
     globals.set("empty_array", empty_array)?;
 
     let val = lua
@@ -35,7 +36,7 @@ fn test_serialize() -> Result<(), Box<dyn StdError>> {
             _integer = 123,
             _number = 321.99,
             _string = "test string serialization",
-            _table_arr = {nil, "value 1", nil, "value 2", {}},
+            _table_arr = {null, "value 1", 2, "value 3", {}},
             _table_map = {["table"] = "map", ["null"] = null},
             _bytes = "\240\040\140\040",
             _userdata = ud,
@@ -52,7 +53,7 @@ fn test_serialize() -> Result<(), Box<dyn StdError>> {
         "_integer": 123,
         "_number": 321.99,
         "_string": "test string serialization",
-        "_table_arr": [null, "value 1", null, "value 2", {}],
+        "_table_arr": [null, "value 1", 2, "value 3", {}],
         "_table_map": {"table": "map", "null": null},
         "_bytes": [240, 40, 140, 40],
         "_userdata": [123, "test userdata"],
@@ -108,21 +109,18 @@ fn test_serialize_failure() -> Result<(), Box<dyn StdError>> {
     let lua = Lua::new();
 
     let ud = Value::UserData(lua.create_userdata(MyUserData(123))?);
-    match serde_json::to_value(&ud) {
-        Ok(v) => panic!("expected serialization error, got {}", v),
-        Err(serde_json::Error { .. }) => {}
+    if let Ok(v) = serde_json::to_value(&ud) {
+        panic!("expected serialization error, got {}", v);
     }
 
     let func = lua.create_function(|_, _: ()| Ok(()))?;
-    match serde_json::to_value(&Value::Function(func.clone())) {
-        Ok(v) => panic!("expected serialization error, got {}", v),
-        Err(serde_json::Error { .. }) => {}
+    if let Ok(v) = serde_json::to_value(Value::Function(func.clone())) {
+        panic!("expected serialization error, got {}", v);
     }
 
     let thr = lua.create_thread(func)?;
-    match serde_json::to_value(&Value::Thread(thr)) {
-        Ok(v) => panic!("expected serialization error, got {}", v),
-        Err(serde_json::Error { .. }) => {}
+    if let Ok(v) = serde_json::to_value(Value::Thread(thr)) {
+        panic!("expected serialization error, got {}", v);
     }
 
     Ok(())
@@ -165,6 +163,18 @@ fn test_serialize_vector() -> Result<(), Box<dyn StdError>> {
 }
 
 #[test]
+#[cfg(feature = "luau")]
+fn test_deserialize_vector_length() -> LuaResult<()> {
+    let lua = Lua::new();
+    let value = lua.load("vector.create(1, 2, 3)").eval()?;
+    assert!(matches!(
+        lua.from_value::<[f32; 2]>(value),
+        Err(Error::DeserializeError(_))
+    ));
+    Ok(())
+}
+
+#[test]
 fn test_serialize_sorted() -> LuaResult<()> {
     let lua = Lua::new();
 
@@ -172,7 +182,7 @@ fn test_serialize_sorted() -> LuaResult<()> {
     globals.set("null", lua.null())?;
 
     let empty_array = lua.create_table()?;
-    empty_array.set_metatable(Some(lua.array_metatable()));
+    empty_array.set_metatable(Some(lua.array_metatable()))?;
     globals.set("empty_array", empty_array)?;
 
     let value = lua
@@ -183,7 +193,7 @@ fn test_serialize_sorted() -> LuaResult<()> {
             _integer = 123,
             _number = 321.99,
             _string = "test string serialization",
-            _table_arr = {nil, "value 1", nil, "value 2", {}},
+            _table_arr = {null, "value 1", 2, "value 3", {}},
             _table_map = {["table"] = "map", ["null"] = null},
             _bytes = "\240\040\140\040",
             _null = null,
@@ -197,7 +207,7 @@ fn test_serialize_sorted() -> LuaResult<()> {
     let json = serde_json::to_string(&value.to_serializable().sort_keys(true)).unwrap();
     assert_eq!(
         json,
-        r#"{"_bool":true,"_bytes":[240,40,140,40],"_empty_array":[],"_empty_map":{},"_integer":123,"_null":null,"_number":321.99,"_string":"test string serialization","_table_arr":[null,"value 1",null,"value 2",{}],"_table_map":{"null":null,"table":"map"}}"#
+        r#"{"_bool":true,"_bytes":[240,40,140,40],"_empty_array":[],"_empty_map":{},"_integer":123,"_null":null,"_number":321.99,"_string":"test string serialization","_table_arr":[null,"value 1",2,"value 3",{}],"_table_map":{"null":null,"table":"map"}}"#
     );
 
     Ok(())
@@ -244,6 +254,85 @@ fn test_serialize_same_table_twice() -> LuaResult<()> {
         .eval::<Value>()?;
     let json = serde_json::to_string(&value.to_serializable().sort_keys(true)).unwrap();
     assert_eq!(json, r#"{"a":{},"b":{}}"#);
+
+    Ok(())
+}
+
+#[test]
+fn test_serialize_empty_table() -> LuaResult<()> {
+    let lua = Lua::new();
+
+    let table = Value::Table(lua.create_table()?);
+    let json = serde_json::to_string(&table.to_serializable()).unwrap();
+    assert_eq!(json, "{}");
+
+    // Set the option to encode empty tables as array
+    let json = serde_json::to_string(&table.to_serializable().encode_empty_tables_as_array(true)).unwrap();
+    assert_eq!(json, "[]");
+
+    // Check hashmap table with this option
+    table.as_table().unwrap().set("hello", "world")?;
+    let json = serde_json::to_string(&table.to_serializable().encode_empty_tables_as_array(true)).unwrap();
+    assert_eq!(json, r#"{"hello":"world"}"#);
+
+    Ok(())
+}
+
+#[test]
+fn test_serialize_mixed_table() -> LuaResult<()> {
+    let lua = Lua::new();
+
+    // Check that sparse array is serialized similarly when using direct serialization
+    // and via `Lua::from_value`
+    let table = lua.load("{1,2,3,nil,5}").eval::<Value>()?;
+    let json1 = serde_json::to_string(&table).unwrap();
+    let json2 = lua.from_value::<serde_json::Value>(table)?;
+    assert_eq!(json1, json2.to_string());
+
+    // A table with several borders should be correctly encoded when `detect_mixed_tables` is
+    // enabled
+    let table = lua
+        .load(
+            r#"
+        local t = {1,2,3,nil,5,6}
+        t[10] = 10
+        return t
+    "#,
+        )
+        .eval::<Value>()?;
+    let json = serde_json::to_string(&table.to_serializable().detect_mixed_tables(true)).unwrap();
+    assert_eq!(json, r#"[1,2,3,null,5,6,null,null,null,10]"#);
+
+    for (key, expected) in [
+        (9, "[null,null,null,null,null,null,null,null,42]"),
+        (10, r#"{"10":42}"#),
+        (1000, r#"{"1000":42}"#),
+    ] {
+        let table = lua.create_table_from([(key, 42)])?.into_lua(&lua)?;
+        let json = serde_json::to_string(&table.to_serializable().detect_mixed_tables(true)).unwrap();
+        assert_eq!(json, expected);
+        let options = DeserializeOptions::new().detect_mixed_tables(true);
+        let value = lua.from_value_with::<serde_value::Value>(table, options)?;
+        assert_eq!(serde_json::to_string(&value).unwrap(), expected);
+    }
+
+    // A mixed table with both array-like and map-like entries
+    let table = lua.load(r#"{1,2,3, key="value"}"#).eval::<Value>()?;
+    let json = serde_json::to_string(&table).unwrap();
+    assert_eq!(json, r#"[1,2,3]"#);
+    let json = serde_json::to_string(&table.to_serializable().detect_mixed_tables(true)).unwrap();
+    assert_eq!(json, r#"{"1":1,"2":2,"3":3,"key":"value"}"#);
+
+    // A mixed table with duplicate keys of different types
+    let table = lua.load(r#"{1,2,3, ["1"]="value"}"#).eval::<Value>()?;
+    let json = serde_json::to_string(&table.to_serializable().detect_mixed_tables(true)).unwrap();
+    assert_eq!(json, r#"{"1":1,"2":2,"3":3,"1":"value"}"#);
+
+    // Array metatable takes precedence
+    let table = lua.load(r#"{1,2,3, key="value"}"#).eval::<Value>()?;
+    (table.as_table().unwrap()).set_metatable(Some(lua.array_metatable()))?;
+    let json = serde_json::to_string(&table.to_serializable().detect_mixed_tables(true)).unwrap();
+    assert_eq!(json, r#"[1,2,3]"#);
 
     Ok(())
 }
@@ -410,6 +499,103 @@ fn test_from_value_nested_tables() -> Result<(), Box<dyn StdError>> {
 }
 
 #[test]
+fn test_serde_recursion_limit() -> LuaResult<()> {
+    let lua = Lua::new();
+    let nested = lua
+        .load("local key, depth = ...; local t; for i = 1, depth do t = {[key] = t} end; return t")
+        .into_function()?;
+    for key in [Value::Integer(1), "next".into_lua(&lua)?] {
+        for (limit, depth) in [
+            (0, 0),
+            (0, 1),
+            (2, 2),
+            (2, 3),
+            (128, 128),
+            (128, 129),
+            (128, 15_000),
+        ] {
+            let value: Value = nested.call((&key, depth))?;
+            let options = DeserializeOptions::new()
+                .deny_recursive_tables(false)
+                .recursion_limit(limit);
+            let result = lua.from_value_with::<serde_json::Value>(value.clone(), options);
+            let serialized = serde_json::to_string(
+                &value
+                    .to_serializable()
+                    .deny_recursive_tables(false)
+                    .recursion_limit(limit),
+            );
+            if depth == limit {
+                result?;
+                assert!(serialized.is_ok());
+            } else {
+                assert!(
+                    matches!(result, Err(Error::DeserializeError(err)) if err == "recursion limit exceeded")
+                );
+                assert_eq!(serialized.unwrap_err().to_string(), "recursion limit exceeded");
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn test_to_value_recursion_limit() -> LuaResult<()> {
+    struct Nested(usize, u8);
+
+    #[derive(Serialize)]
+    enum Variant<'a> {
+        Newtype(&'a Nested),
+        Tuple(&'a Nested, ()),
+        Struct { next: &'a Nested },
+    }
+
+    impl Serialize for Nested {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            if self.0 == 0 {
+                return serializer.serialize_unit();
+            }
+            let next = Nested(self.0 - 1, self.1);
+            match self.1 {
+                0 => [next].serialize(serializer),
+                1 => serializer.collect_map(std::iter::once(("next", next))),
+                2 => Some(next).serialize(serializer),
+                3 => serializer.serialize_newtype_struct("Nested", &next),
+                4 => Variant::Newtype(&next).serialize(serializer),
+                5 => Variant::Tuple(&next, ()).serialize(serializer),
+                6 => Variant::Struct { next: &next }.serialize(serializer),
+                _ => {
+                    #[derive(Serialize)]
+                    struct Node<'a> {
+                        next: &'a Nested,
+                    }
+                    Node { next: &next }.serialize(serializer)
+                }
+            }
+        }
+    }
+
+    let lua = Lua::new();
+    assert_eq!(SerializeOptions::new().recursion_limit, 128);
+    assert_eq!(DeserializeOptions::new().recursion_limit, 128);
+    for kind in 0..8 {
+        assert!(matches!(
+            lua.to_value(&Nested(15_000, kind)),
+            Err(Error::SerializeError(err)) if err == "recursion limit exceeded"
+        ));
+        for limit in [0, 2, 128, 130] {
+            let options = SerializeOptions::new().recursion_limit(limit);
+            lua.to_value_with(&Nested(limit, kind), options)?;
+            assert!(matches!(
+                lua.to_value_with(&Nested(limit + 1, kind), options),
+                Err(Error::SerializeError(err)) if err == "recursion limit exceeded"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn test_from_value_struct() -> Result<(), Box<dyn StdError>> {
     let lua = Lua::new();
 
@@ -420,6 +606,7 @@ fn test_from_value_struct() -> Result<(), Box<dyn StdError>> {
         map: HashMap<i32, i32>,
         empty: Vec<()>,
         tuple: (u8, u8, u8),
+        bytes: BString,
     }
 
     let value = lua
@@ -431,6 +618,7 @@ fn test_from_value_struct() -> Result<(), Box<dyn StdError>> {
                 map = {2, [4] = 1},
                 empty = {},
                 tuple = {10, 20, 30},
+                bytes = "\240\040\140\040",
             }
         "#,
         )
@@ -443,6 +631,7 @@ fn test_from_value_struct() -> Result<(), Box<dyn StdError>> {
             map: vec![(1, 2), (4, 1)].into_iter().collect(),
             empty: vec![],
             tuple: (10, 20, 30),
+            bytes: BString::from([240, 40, 140, 40]),
         },
         got
     );
@@ -503,6 +692,19 @@ fn test_from_value_enum() -> Result<(), Box<dyn StdError>> {
     let value = lua.load(r#"{Wrap = null}"#).eval()?;
     let got = lua.from_value(value)?;
     assert_eq!(E::Wrap(()), got);
+
+    #[derive(Deserialize, PartialEq, Debug)]
+    enum Recursive {
+        End,
+        Next(Box<Recursive>),
+    }
+    let value = lua
+        .load(r#"local t = "End"; for i = 1, 15000 do t = {Next = t} end; return t"#)
+        .eval()?;
+    assert!(matches!(
+        lua.from_value::<Recursive>(value),
+        Err(Error::DeserializeError(err)) if err == "recursion limit exceeded"
+    ));
 
     Ok(())
 }
@@ -573,6 +775,18 @@ fn test_from_value_with_options() -> Result<(), Box<dyn StdError>> {
         lua.from_value_with::<Vec<String>>(value, options)?,
         vec!["a".to_string(), "b".to_string(), "c".to_string()]
     );
+
+    lua.globals().set("null", Value::NULL)?;
+    for (source, expected) in [
+        ("{null, 7, function() end}", "[null,7]"),
+        ("{[null] = 42, a = null, b = function() end}", r#"{"a":null}"#),
+    ] {
+        let value: Value = lua.load(source).eval()?;
+        let serializable = value.to_serializable().deny_unsupported_types(false);
+        assert_eq!(serde_json::to_string(&serializable)?, expected);
+        let result = lua.from_value_with::<serde_json::Value>(value, options)?;
+        assert_eq!(result.to_string(), expected);
+    }
 
     // Deny recursive tables by default
     let value = lua.load(r#"local t = {}; t.t = t; return t"#).eval()?;
@@ -664,6 +878,37 @@ fn test_from_value_userdata() -> Result<(), Box<dyn StdError>> {
 }
 
 #[test]
+fn test_from_value_empty_table() -> Result<(), Box<dyn StdError>> {
+    let lua = Lua::new();
+
+    // By default we encode empty tables as objects
+    let t = lua.create_table()?;
+    let got = lua.from_value::<serde_json::Value>(Value::Table(t.clone()))?;
+    assert_eq!(got, serde_json::json!({}));
+
+    // Set the option to encode empty tables as array
+    let got = lua
+        .from_value_with::<serde_json::Value>(
+            Value::Table(t.clone()),
+            DeserializeOptions::new().encode_empty_tables_as_array(true),
+        )
+        .unwrap();
+    assert_eq!(got, serde_json::json!([]));
+
+    // Check hashmap table with this option
+    t.raw_set("hello", "world")?;
+    let got = lua
+        .from_value_with::<serde_json::Value>(
+            Value::Table(t),
+            DeserializeOptions::new().encode_empty_tables_as_array(true),
+        )
+        .unwrap();
+    assert_eq!(got, serde_json::json!({"hello": "world"}));
+
+    Ok(())
+}
+
+#[test]
 fn test_from_value_sorted() -> Result<(), Box<dyn StdError>> {
     let lua = Lua::new();
 
@@ -702,10 +947,15 @@ fn test_arbitrary_precision() {
     let num = lua.to_value_with(&num, opts).unwrap();
     assert_eq!(num, Value::Integer(123));
 
-    // Max u64
+    // Max i64
     let num = serde_json::Value::Number(serde_json::Number::from(i64::MAX));
     let num = lua.to_value_with(&num, opts).unwrap();
-    assert_eq!(num, Value::Number(i64::MAX as f64));
+    assert_eq!(num, i64::MAX.into_lua(&lua).unwrap());
+
+    // Max u64
+    let num = serde_json::Value::Number(serde_json::Number::from(u64::MAX));
+    let num = lua.to_value_with(&num, opts).unwrap();
+    assert_eq!(num, Value::Number(u64::MAX as f64));
 
     // Check that the option is disabled by default
     let num = serde_json::Value::Number(serde_json::Number::from_f64(1.244e2).unwrap());
@@ -722,12 +972,16 @@ fn test_arbitrary_precision() {
 fn test_buffer_serialize() -> LuaResult<()> {
     let lua = Lua::new();
 
-    let buf = lua.create_buffer(&[1, 2, 3, 4])?;
+    let buf = lua.create_buffer([1, 2, 3, 4])?;
     let val = serde_value::to_value(&buf).unwrap();
     assert_eq!(val, serde_value::Value::Bytes(vec![1, 2, 3, 4]));
 
+    let value = Value::Buffer(buf);
+    let borrowed = unsafe { value.to_serializable().borrow_buffers(true) };
+    assert_eq!(serde_value::to_value(&borrowed).unwrap(), val);
+
     // Try empty buffer
-    let buf = lua.create_buffer(&[])?;
+    let buf = lua.create_buffer([])?;
     let val = serde_value::to_value(&buf).unwrap();
     assert_eq!(val, serde_value::Value::Bytes(vec![]));
 
@@ -739,9 +993,56 @@ fn test_buffer_serialize() -> LuaResult<()> {
 fn test_buffer_from_value() -> LuaResult<()> {
     let lua = Lua::new();
 
-    let buf = lua.create_buffer(&[1, 2, 3, 4])?;
-    let val = lua.from_value::<serde_value::Value>(Value::Buffer(buf)).unwrap();
+    let buf = lua.create_buffer([1, 2, 3, 4])?;
+    let value = Value::Buffer(buf);
+    let val = lua.from_value::<serde_value::Value>(value.clone()).unwrap();
     assert_eq!(val, serde_value::Value::Bytes(vec![1, 2, 3, 4]));
+    let options = unsafe { DeserializeOptions::new().borrow_buffers(true) };
+    assert_eq!(lua.from_value_with::<serde_value::Value>(value, options)?, val);
+
+    Ok(())
+}
+
+#[cfg(feature = "luau")]
+#[test]
+fn test_buffer_serde_reentrant() -> LuaResult<()> {
+    struct MutateBuffer(mlua::Buffer, Vec<u8>);
+
+    impl std::io::Write for MutateBuffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.write_bytes(0, &[2]);
+            self.1.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl serde::de::Visitor<'_> for MutateBuffer {
+        type Value = u8;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("bytes")
+        }
+
+        fn visit_bytes<E: serde::de::Error>(self, bytes: &[u8]) -> Result<u8, E> {
+            self.0.write_bytes(0, &[2]);
+            Ok(bytes[0])
+        }
+    }
+
+    let lua = Lua::new();
+
+    let buf = lua.create_buffer([1])?;
+    let mut callback = MutateBuffer(buf.clone(), Vec::new());
+    serde_json::to_writer(&mut callback, &buf).unwrap();
+    assert_eq!(callback.1, b"[1]");
+
+    buf.write_bytes(0, &[1]);
+    let de = mlua::serde::Deserializer::new(Value::Buffer(buf));
+    assert_eq!(serde::Deserializer::deserialize_bytes(de, callback)?, 1);
 
     Ok(())
 }
