@@ -235,6 +235,11 @@ extern "C-unwind" {
     pub fn luau_setfuel(L: *mut lua_State, fuel: u64);
     pub fn luau_getfuel(L: *mut lua_State) -> u64;
 
+    pub fn luau_setmemorylimit(L: *mut lua_State, limit: usize);
+    pub fn luau_getmemoryused(L: *mut lua_State) -> i64;
+    pub fn luau_relaxmemorylimit(L: *mut lua_State, relaxed: c_int) -> c_int;
+    pub fn luau_memoryrefused(L: *mut lua_State) -> c_int;
+
     //
     // Coroutine functions
     //

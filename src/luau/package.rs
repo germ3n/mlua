@@ -130,7 +130,7 @@ unsafe extern "C-unwind" fn lua_require(state: *mut ffi::lua_State) -> c_int {
     for i in 1.. {
         if ffi::lua_rawgeti(state, -1, i) == ffi::LUA_TNIL {
             // no more loaders?
-            if (*err_buf).is_empty() {
+            if (&*err_buf).is_empty() {
                 ffi::luaL_error(state, cstr!("module '%s' not found"), name);
             } else {
                 let bytes = (*err_buf).as_bytes();

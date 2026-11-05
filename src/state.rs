@@ -786,15 +786,30 @@ impl Lua {
     /// generated instead.
     /// Returns previous limit (zero means no limit).
     ///
+    /// On Luau the limit counts from zero where it is set: the bytes of every object made from
+    /// then on, less those freed, by the sizes Luau asks for, so the same code reaches it at the
+    /// same allocation whatever the allocator or the machine. See [`Lua::memory_counted`].
+    ///
     /// Does not work in module mode where Lua state is managed externally.
     pub fn set_memory_limit(&self, limit: usize) -> Result<usize> {
         let lua = self.lock();
         unsafe {
             match MemoryState::get(lua.state()) {
+                #[cfg(feature = "luau")]
+                mem_state if !mem_state.is_null() => Ok(MemoryState::set_luau_memory_limit(lua.main_state(), limit)),
+                #[cfg(not(feature = "luau"))]
                 mem_state if !mem_state.is_null() => Ok((*mem_state).set_memory_limit(limit)),
                 _ => Err(Error::MemoryControlNotAvailable),
             }
         }
+    }
+
+    /// The bytes the memory limit has counted since [`Lua::set_memory_limit`] set it: those of
+    /// every object made since, less those freed. Below zero when more was freed than made.
+    #[cfg(feature = "luau")]
+    pub fn memory_counted(&self) -> i64 {
+        let lua = self.lock();
+        unsafe { ffi::luau_getmemoryused(lua.main_state()) }
     }
 
     /// Returns `true` if the garbage collector is currently running automatically.

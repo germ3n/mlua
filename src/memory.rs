@@ -50,9 +50,20 @@ impl MemoryState {
         prev_limit as usize
     }
 
+    // Luau keeps the limit itself, counting the sizes it asks for rather than what reaches this
+    // allocator: its objects live in pages, and which allocation needs a new page depends on
+    // where earlier frees left room, so a count here moves differently for the same script. The
+    // count starts at zero now, and this state's own copy of the limit only says one is set.
+    #[cfg(feature = "luau")]
+    #[inline]
+    pub(crate) unsafe fn set_luau_memory_limit(state: *mut ffi::lua_State, limit: usize) -> usize {
+        ffi::luau_setmemorylimit(state, limit);
+        (*Self::get(state)).set_memory_limit(limit)
+    }
+
     // This function is used primarily for calling `lua_pushcfunction` in lua5.1/jit/luau
     // to bypass the memory limit (if set).
-    #[cfg(any(feature = "lua51", feature = "luajit", feature = "luau"))]
+    #[cfg(any(feature = "lua51", feature = "luajit"))]
     #[inline]
     pub(crate) unsafe fn relax_limit_with(state: *mut ffi::lua_State, f: impl FnOnce()) {
         let mem_state = Self::get(state);
@@ -65,6 +76,15 @@ impl MemoryState {
         }
     }
 
+    // Luau enforces the limit, so Luau relaxes it.
+    #[cfg(feature = "luau")]
+    #[inline]
+    pub(crate) unsafe fn relax_limit_with(state: *mut ffi::lua_State, f: impl FnOnce()) {
+        let previous = ffi::luau_relaxmemorylimit(state, 1);
+        f();
+        ffi::luau_relaxmemorylimit(state, previous);
+    }
+
     // Does nothing apart from calling `f()`, we don't need to bypass any limits
     #[cfg(any(feature = "lua52", feature = "lua53", feature = "lua54"))]
     #[inline]
@@ -72,11 +92,11 @@ impl MemoryState {
         f();
     }
 
-    // Returns `true` if the memory limit was reached on the last memory operation
+    // Returns `true` if the error being raised is the memory limit refusing an allocation
     #[cfg(feature = "luau")]
     #[inline]
     pub(crate) unsafe fn limit_reached(state: *mut ffi::lua_State) -> bool {
-        (*Self::get(state)).limit_reached
+        (*Self::get(state)).limit_reached || ffi::luau_memoryrefused(state) != 0
     }
 }
 
@@ -113,7 +133,8 @@ unsafe extern "C-unwind" fn allocator(
     if !ptr.is_null() {
         mem_diff -= osize as isize;
     }
-    let mem_limit = mem_state.memory_limit;
+    // Luau enforces its own limit, by its own count; see `set_luau_memory_limit`.
+    let mem_limit = if cfg!(feature = "luau") { 0 } else { mem_state.memory_limit };
     let new_used_memory = mem_state.used_memory + mem_diff;
     if mem_limit > 0 && new_used_memory > mem_limit && !mem_state.ignore_limit {
         #[cfg(feature = "luau")]

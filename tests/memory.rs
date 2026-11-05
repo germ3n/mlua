@@ -5,6 +5,8 @@ use mlua::{Error, GCMode, Lua, Result, UserData};
 #[test]
 fn test_memory_limit() -> Result<()> {
     let lua = Lua::new();
+    #[cfg(feature = "luau")]
+    lua.set_fuel(u64::MAX)?;
 
     let initial_memory = lua.used_memory();
     assert!(
@@ -22,7 +24,9 @@ fn test_memory_limit() -> Result<()> {
         return Ok(());
     }
 
-    lua.set_memory_limit(initial_memory + 10000)?;
+    // Luau counts from zero where the limit is set; the others count the whole heap.
+    let base = if cfg!(feature = "luau") { 0 } else { initial_memory };
+    lua.set_memory_limit(base + 10000)?;
     match f.call::<()>(()) {
         Err(Error::MemoryError(_)) => {}
         something_else => panic!("did not trigger memory error: {:?}", something_else),
@@ -31,8 +35,8 @@ fn test_memory_limit() -> Result<()> {
     lua.set_memory_limit(0)?;
     f.call::<()>(()).expect("should trigger no memory limit");
 
-    // Test memory limit during chunk loading
-    lua.set_memory_limit(1024)?;
+    // Test memory limit during chunk loading: Luau's count starts at zero, so less is enough
+    lua.set_memory_limit(if cfg!(feature = "luau") { 64 } else { 1024 })?;
     match lua
         .load("local t = {}; for i = 1,10000 do t[i] = i end")
         .into_function()
@@ -44,6 +48,8 @@ fn test_memory_limit() -> Result<()> {
     Ok(())
 }
 
+// In the fork, fuel belongs to each Luau thread, and a new one has none.
+#[cfg(not(feature = "luau"))]
 #[test]
 fn test_memory_limit_thread() -> Result<()> {
     let lua = Lua::new();
@@ -57,12 +63,47 @@ fn test_memory_limit_thread() -> Result<()> {
         return Ok(());
     }
 
-    lua.set_memory_limit(lua.used_memory() + 10000)?;
+    let base = if cfg!(feature = "luau") { 0 } else { lua.used_memory() };
+    lua.set_memory_limit(base + 10000)?;
     let thread = lua.create_thread(f)?;
     match thread.resume::<()>(()) {
         Err(Error::MemoryError(_)) => {}
         something_else => panic!("did not trigger memory error: {:?}", something_else),
     };
+
+    Ok(())
+}
+
+// Luau counts the memory limit by the sizes it asks for, from where the limit is set, so the same
+// code counts the same bytes and runs out at the same point in any state, and garbage the
+// collector frees comes off.
+#[cfg(feature = "luau")]
+#[test]
+fn test_memory_counted() -> Result<()> {
+    let counted = || -> Result<(i64, String)> {
+        let lua = Lua::new();
+        lua.set_fuel(u64::MAX)?;
+        lua.set_memory_limit(1 << 20)?;
+        assert_eq!(lua.memory_counted(), 0);
+
+        let kept = lua.load("local t = {} for i = 1, 1000 do t[i] = { i } end return t").eval::<mlua::Table>()?;
+        let made = lua.memory_counted();
+        assert!(made > 1000 * 16, "{made}");
+
+        // Far more garbage than the limit, which the collector frees as it goes.
+        lua.load("for i = 1, 20000 do local s = string.rep('x', 1000) .. i end").exec()?;
+        drop(kept);
+
+        let failed = lua.load("local t = {} local n = 0 while true do n += 1 t[n] = string.rep('y', 1000) .. n end").exec();
+        match failed {
+            Err(Error::MemoryError(_)) => {}
+            other => panic!("did not trigger memory error: {other:?}"),
+        }
+
+        Ok((made, format!("{}", lua.memory_counted())))
+    };
+
+    assert_eq!(counted()?, counted()?);
 
     Ok(())
 }
