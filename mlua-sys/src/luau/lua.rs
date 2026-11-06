@@ -265,6 +265,13 @@ unsafe extern "C-unwind" {
     pub fn luau_setfuel(L: *mut lua_State, fuel: u64);
     pub fn luau_getfuel(L: *mut lua_State) -> u64;
 
+    // chainv4: what fuel costs in a state, a slot per opcode and then the library's rates.
+    pub fn luau_fuelslots() -> c_int;
+    pub fn luau_fuelslotname(slot: c_int) -> *const c_char;
+    pub fn luau_setfuelcosts(L: *mut lua_State, costs: *const u64, n: c_int);
+    pub fn luau_getfuelcosts(L: *mut lua_State, costs: *mut u64, n: c_int);
+    pub fn luau_getdefaultfuelcosts(costs: *mut u64, n: c_int);
+
     pub fn luau_setmemorylimit(L: *mut lua_State, limit: usize);
     pub fn luau_getmemoryused(L: *mut lua_State) -> i64;
     pub fn luau_relaxmemorylimit(L: *mut lua_State, relaxed: c_int) -> c_int;

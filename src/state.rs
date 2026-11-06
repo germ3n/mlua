@@ -1867,6 +1867,52 @@ impl Lua {
         }
     }
 
+    /// What fuel costs in this state: a slot per opcode, by its number, then the library's rates,
+    /// each named by [`Lua::fuel_cost_names`]. A state starts with [`Lua::default_fuel_costs`].
+    #[cfg(feature = "luau")]
+    pub fn fuel_costs(&self) -> Vec<u64> {
+        let lua = self.lock();
+        let mut costs = vec![0; Self::fuel_cost_slots()];
+        unsafe { ffi::luau_getfuelcosts(lua.state(), costs.as_mut_ptr(), costs.len() as c_int) };
+
+        costs
+    }
+
+    /// Sets what fuel costs in this state, slot by slot from the first: a shorter list keeps the
+    /// rest. A library's rate, bytes or elements a unit of fuel pays for, is at least 1.
+    #[cfg(feature = "luau")]
+    pub fn set_fuel_costs(&self, costs: &[u64]) {
+        let lua = self.lock();
+        let n = costs.len().min(Self::fuel_cost_slots());
+        unsafe { ffi::luau_setfuelcosts(lua.state(), costs.as_ptr(), n as c_int) };
+    }
+
+    /// The fuel costs every state starts with.
+    #[cfg(feature = "luau")]
+    pub fn default_fuel_costs() -> Vec<u64> {
+        let mut costs = vec![0; Self::fuel_cost_slots()];
+        unsafe { ffi::luau_getdefaultfuelcosts(costs.as_mut_ptr(), costs.len() as c_int) };
+
+        costs
+    }
+
+    /// Each fuel cost slot's name, an opcode's such as `ADD` or a rate's such as `bytes_per_fuel`,
+    /// or None for a slot nothing uses.
+    #[cfg(feature = "luau")]
+    pub fn fuel_cost_names() -> Vec<Option<&'static str>> {
+        (0..Self::fuel_cost_slots())
+            .map(|slot| unsafe {
+                let name = ffi::luau_fuelslotname(slot as c_int);
+                (!name.is_null()).then(|| std::ffi::CStr::from_ptr(name).to_str().unwrap_or_default())
+            })
+            .collect()
+    }
+
+    #[cfg(feature = "luau")]
+    fn fuel_cost_slots() -> usize {
+        unsafe { ffi::luau_fuelslots() as usize }
+    }
+
     /// Sets the global environment.
     ///
     /// This will replace the current global environment with the provided `globals` table.
