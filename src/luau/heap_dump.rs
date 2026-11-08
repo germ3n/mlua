@@ -27,9 +27,10 @@ impl HeapDump {
         }
 
         let mut buf = Vec::new();
-        #[cfg(any(all(target_arch = "wasm32", target_os = "unknown"), target_os = "wasi"))]
+        // No files to dump into on the web, on WASI, or in a zkVM such as SP1's.
+        #[cfg(any(all(target_arch = "wasm32", target_os = "unknown"), target_os = "wasi", target_os = "zkvm"))]
         let _ = (state, &mut buf, category_name);
-        #[cfg(not(any(all(target_arch = "wasm32", target_os = "unknown"), target_os = "wasi")))]
+        #[cfg(not(any(all(target_arch = "wasm32", target_os = "unknown"), target_os = "wasi", target_os = "zkvm")))]
         unsafe {
             let file = libc::tmpfile();
             if file.is_null() {
